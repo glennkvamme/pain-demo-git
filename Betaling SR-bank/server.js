@@ -10,6 +10,9 @@ const DATA_DIR = path.join(__dirname, 'data');
 const CREDITORS_FILE = path.join(DATA_DIR, 'creditors.json');
 const HISTORY_FILE = path.join(DATA_DIR, 'history.json');
 const BACKUP_DIR = path.join(__dirname, 'backups');
+const PAYER_NAME = 'Kraft Bank ASA';
+const PAYER_ORG_NO = '918315446';
+const PAYER_BBAN = '32072278835';
 
 app.use(express.json());
 app.use(express.static('public'));
@@ -260,7 +263,11 @@ function buildTransactionXml(tx) {
             </CdtrRefInf>
           </Strd>
         </RmtInf>`
-    : '';
+    : (tx.customerNote
+      ? `<RmtInf>
+          <Ustrd>${escapeXml(tx.customerNote)}</Ustrd>
+        </RmtInf>`
+      : '');
 
   const supplementaryDataXml = tx.internalNote
     ? `<SplmtryData>
@@ -272,25 +279,28 @@ function buildTransactionXml(tx) {
 
   return `<CdtTrfTxInf>
         <PmtId>
+          <InstrId>${escapeXml(tx.instrId)}</InstrId>
           <EndToEndId>${escapeXml(tx.endToEndId)}</EndToEndId>
         </PmtId>
         <Amt>
           <InstdAmt Ccy="NOK">${escapeXml(tx.amount)}</InstdAmt>
         </Amt>
         <CdtrAgt>
-          <FinInstnId>
-            <Othr>
-              <Id>NOTPROVIDED</Id>
-            </Othr>
-          </FinInstnId>
+          <FinInstnId/>
         </CdtrAgt>
         <Cdtr>
           <Nm>${escapeXml(tx.creditor)}</Nm>
+          <PstlAdr>
+            <Ctry>NO</Ctry>
+          </PstlAdr>
         </Cdtr>
         <CdtrAcct>
           <Id>
             <Othr>
               <Id>${escapeXml(tx.accountNumber)}</Id>
+              <SchmeNm>
+                <Cd>BBAN</Cd>
+              </SchmeNm>
             </Othr>
           </Id>
         </CdtrAcct>
@@ -309,22 +319,42 @@ function buildPaymentInfoXml({ stamp, index, dueDate, transactions }) {
   return `<PmtInf>
       <PmtInfId>PMT${escapeXml(stamp)}_${index}</PmtInfId>
       <PmtMtd>TRF</PmtMtd>
+      <PmtTpInf>
+        <InstrPrty>NORM</InstrPrty>
+      </PmtTpInf>
       <NbOfTxs>${transactions.length}</NbOfTxs>
       <CtrlSum>${escapeXml(ctrlSum)}</CtrlSum>
       <ReqdExctnDt>${escapeXml(dueDate)}</ReqdExctnDt>
       <Dbtr>
-        <Nm>SR-Bank</Nm>
+        <Nm>${escapeXml(PAYER_NAME)}</Nm>
+        <PstlAdr>
+          <Ctry>NO</Ctry>
+        </PstlAdr>
+        <Id>
+          <OrgId>
+            <Othr>
+              <Id>${escapeXml(PAYER_ORG_NO)}</Id>
+              <SchmeNm>
+                <Cd>CUST</Cd>
+              </SchmeNm>
+            </Othr>
+          </OrgId>
+        </Id>
       </Dbtr>
       <DbtrAcct>
         <Id>
           <Othr>
-            <Id>00000000000</Id>
+            <Id>${escapeXml(PAYER_BBAN)}</Id>
+            <SchmeNm>
+              <Cd>BBAN</Cd>
+            </SchmeNm>
           </Othr>
         </Id>
+        <Ccy>NOK</Ccy>
       </DbtrAcct>
       <DbtrAgt>
         <FinInstnId>
-          <BIC>SPSONO22XXX</BIC>
+          <BIC>SPRONO22</BIC>
         </FinInstnId>
       </DbtrAgt>
       <ChrgBr>SLEV</ChrgBr>
@@ -337,11 +367,18 @@ function buildPain001Xml(transactions) {
   const stamp = now.toISOString().replace(/[-:.TZ]/g, '').slice(0, 14);
 
   const groups = new Map();
+  let instructionSequence = 1;
   for (const tx of transactions) {
+    const txWithInstruction = {
+      ...tx,
+      instrId: String(instructionSequence),
+    };
+    instructionSequence += 1;
+
     if (!groups.has(tx.dueDate)) {
       groups.set(tx.dueDate, []);
     }
-    groups.get(tx.dueDate).push(tx);
+    groups.get(tx.dueDate).push(txWithInstruction);
   }
 
   const paymentInfos = Array.from(groups.entries())
@@ -364,12 +401,34 @@ function buildPain001Xml(transactions) {
       <NbOfTxs>${transactions.length}</NbOfTxs>
       <CtrlSum>${escapeXml(totalAmount)}</CtrlSum>
       <InitgPty>
-        <Nm>SR-Bank</Nm>
+        <Nm>${escapeXml(PAYER_NAME)}</Nm>
+        <Id>
+          <OrgId>
+            <Othr>
+              <Id>${escapeXml(PAYER_ORG_NO)}</Id>
+              <SchmeNm>
+                <Cd>CUST</Cd>
+              </SchmeNm>
+            </Othr>
+          </OrgId>
+        </Id>
       </InitgPty>
     </GrpHdr>
     ${paymentInfos}
   </CstmrCdtTrfInitn>
 </Document>`;
+}
+
+function buildGeneratedFileName(date) {
+  const pad = (value) => String(value).padStart(2, '0');
+  const yyyy = date.getFullYear();
+  const mm = pad(date.getMonth() + 1);
+  const dd = pad(date.getDate());
+  const hh = pad(date.getHours());
+  const mi = pad(date.getMinutes());
+  const ss = pad(date.getSeconds());
+
+  return `pain001_KraftBankASA_${yyyy}${mm}${dd}_${hh}${mi}${ss}.xml`;
 }
 
 app.get('/api/creditors', (req, res) => {
@@ -452,10 +511,10 @@ app.post('/api/pain001', (req, res) => {
   }
 
   const xml = buildPain001Xml(validated);
-  const stamp = new Date().toISOString();
-  const datePart = stamp.slice(0, 10).replace(/-/g, '');
+  const now = new Date();
+  const stamp = now.toISOString();
   const compactStamp = stamp.replace(/[-:.TZ]/g, '').slice(0, 14);
-  const generatedFileName = `pain001_batch_${datePart}.xml`;
+  const generatedFileName = buildGeneratedFileName(now);
   const backupFileName = `pain001_${compactStamp}_${crypto.randomUUID().slice(0, 8)}.xml`;
 
   ensureHistoryStore();
@@ -484,4 +543,5 @@ ensureHistoryStore();
 app.listen(port, () => {
   console.log(`Betaling SR-bank kjorer pa http://localhost:${port}`);
 });
+
 

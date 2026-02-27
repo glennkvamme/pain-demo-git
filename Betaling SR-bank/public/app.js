@@ -152,6 +152,22 @@ function updateSummary() {
   });
 }
 
+function extractFilenameFromDisposition(contentDisposition) {
+  if (!contentDisposition) return null;
+
+  const utf8Match = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match && utf8Match[1]) {
+    return decodeURIComponent(utf8Match[1]);
+  }
+
+  const basicMatch = contentDisposition.match(/filename=\"?([^\";]+)\"?/i);
+  if (basicMatch && basicMatch[1]) {
+    return basicMatch[1];
+  }
+
+  return null;
+}
+
 function applyCreditorAccount(creditorInput, accountInput) {
   const creditorKey = normalizeCreditorName(creditorInput.value);
   const predefinedAccount = creditorAccountByName.get(creditorKey);
@@ -371,8 +387,8 @@ form.addEventListener('submit', async (event) => {
     }
 
     const blob = await response.blob();
-    const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    const fileName = `pain001_batch_${stamp}.xml`;
+    const contentDisposition = response.headers.get('Content-Disposition');
+    const fileName = extractFilenameFromDisposition(contentDisposition) || 'pain001.xml';
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
 
