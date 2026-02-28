@@ -1,0 +1,9 @@
+.git
+.gitignore
+**/.DS_Store
+**/Thumbs.db
+bin/
+obj/
+frontend/node_modules/
+backups/
+data/foringer.json

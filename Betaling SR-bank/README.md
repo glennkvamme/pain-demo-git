@@ -23,3 +23,9 @@ App for a generere ISO 20022 `pain.001` XML fra:
 - For lokal frontend-utvikling:
   1. `cd "Betaling SR-bank\\frontend"`
   2. `npm run dev`
+
+## Deploy pa Render
+
+- Repoet inneholder `render.yaml` + `Dockerfile` for .NET 8 + React build.
+- Importer repoet i Render som `Blueprint`.
+- Tjenesten bruker persistent disk pa `/var/data` via `APP_STORAGE_ROOT`.

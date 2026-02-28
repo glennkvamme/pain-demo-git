@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: betaling-sr-bank
+    runtime: docker
+    region: frankfurt
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    autoDeploy: true
+    envVars:
+      - key: APP_STORAGE_ROOT
+        value: /var/data
+      - key: ASPNETCORE_ENVIRONMENT
+        value: Production
+    disk:
+      name: betaling-data
+      mountPath: /var/data
+      sizeGB: 1

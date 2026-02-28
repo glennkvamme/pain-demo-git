@@ -12,7 +12,12 @@ var options = new WebApplicationOptions
 var builder = WebApplication.CreateBuilder(options);
 
 var app = builder.Build();
-var dataStore = new DataStore(app.Environment.ContentRootPath);
+var storageRootPath = (Environment.GetEnvironmentVariable("APP_STORAGE_ROOT") ?? string.Empty).Trim();
+if (string.IsNullOrWhiteSpace(storageRootPath))
+{
+    storageRootPath = app.Environment.ContentRootPath;
+}
+var dataStore = new DataStore(storageRootPath);
 dataStore.EnsureStores();
 
 app.UseDefaultFiles();
