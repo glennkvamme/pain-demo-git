@@ -1,0 +1,140 @@
+import { useEffect, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+
+function formatDate(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value || "";
+  return date.toLocaleString("nb-NO");
+}
+
+export default function DashboardPage() {
+  const [foringer, setForinger] = useState([]);
+  const [cloNumber, setCloNumber] = useState("");
+  const [caseHandler, setCaseHandler] = useState("");
+  const [statusText, setStatusText] = useState("");
+  const navigate = useNavigate();
+
+  async function loadForinger() {
+    try {
+      const response = await fetch("/api/foringer");
+      if (!response.ok) throw new Error("Kunne ikke hente foringsliste.");
+      const payload = await response.json();
+      setForinger(Array.isArray(payload) ? payload : []);
+    } catch (error) {
+      setStatusText(error.message || "Ukjent feil.");
+    }
+  }
+
+  useEffect(() => {
+    loadForinger();
+  }, []);
+
+  async function createForing(event) {
+    event.preventDefault();
+
+    if (!cloNumber.trim() || !caseHandler.trim()) {
+      setStatusText("CLO nummer og saksbehandler ma fylles ut.");
+      return;
+    }
+
+    setStatusText("Oppretter foring...");
+    try {
+      const response = await fetch("/api/foringer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          cloNumber: cloNumber.trim(),
+          caseHandler: caseHandler.trim(),
+        }),
+      });
+
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({ error: "Ukjent feil." }));
+        throw new Error(body.error || "Kunne ikke opprette foring.");
+      }
+
+      const created = await response.json();
+      setStatusText("Foring opprettet.");
+      navigate(`/foring/${created.id}`);
+    } catch (error) {
+      setStatusText(error.message || "Ukjent feil.");
+    }
+  }
+
+  return (
+    <>
+      <h1>Oversikt</h1>
+      <p>Liste over alle foringer. CLO nummer er master for oppfolging av pagaende og ferdige foringer.</p>
+
+      <form onSubmit={createForing}>
+        <section className="meta-grid">
+          <label htmlFor="newCloNumber">Nytt CLO nummer</label>
+          <input
+            id="newCloNumber"
+            name="newCloNumber"
+            type="text"
+            required
+            value={cloNumber}
+            onChange={(event) => setCloNumber(event.target.value)}
+          />
+
+          <label htmlFor="newCaseHandler">Saksbehandler</label>
+          <input
+            id="newCaseHandler"
+            name="newCaseHandler"
+            type="text"
+            required
+            value={caseHandler}
+            onChange={(event) => setCaseHandler(event.target.value)}
+          />
+        </section>
+
+        <div className="actions actions-left">
+          <button type="submit">Opprett ny foring</button>
+          <button type="button" className="secondary-btn" onClick={loadForinger}>
+            Oppdater liste
+          </button>
+        </div>
+      </form>
+
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>CLO nummer</th>
+              <th>Saksbehandler</th>
+              <th>Opprettet</th>
+              <th>Status</th>
+              <th>Handling</th>
+            </tr>
+          </thead>
+          <tbody>
+            {foringer.length === 0 ? (
+              <tr>
+                <td colSpan={6}>Ingen foringer funnet.</td>
+              </tr>
+            ) : (
+              foringer.map((item, index) => (
+                <tr key={item.id || `foring-${index}`}>
+                  <td>{index + 1}</td>
+                  <td>{item.cloNumber || ""}</td>
+                  <td>{item.caseHandler || ""}</td>
+                  <td>{formatDate(item.createdAt)}</td>
+                  <td>{item.status || "Pågående"}</td>
+                  <td>
+                    <Link className="download-link" to={`/foring/${item.id}`}>
+                      Apne foring
+                    </Link>
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <p id="status">{statusText}</p>
+    </>
+  );
+}

@@ -1,14 +1,25 @@
-﻿# Betaling SR-bank
+# Betaling SR-bank
 
-En enkel Node/Express-app som genererer ISO 20022 `pain.001` XML fra:
+App for a generere ISO 20022 `pain.001` XML fra:
 - KID-nummer
 - Kontonummer
-- Beløp
+- Belop
 - Dato
 
-## Kjør lokalt
+## Kjor lokalt (.NET 8)
 
-1. `cd "Betaling SR-bank"`
-2. `npm install`
-3. `npm start`
-4. Åpne `http://localhost:3200`
+1. Installer .NET 8 SDK
+2. `cd "Betaling SR-bank"`
+3. `dotnet run`
+4. Applikasjonen starter pa `http://localhost:3200`
+
+## Frontend (React)
+
+- React-kildekode ligger i `frontend/`.
+- Bygg frontend til `public/` med:
+  1. `cd "Betaling SR-bank\\frontend"`
+  2. `npm install`
+  3. `npm run build`
+- For lokal frontend-utvikling:
+  1. `cd "Betaling SR-bank\\frontend"`
+  2. `npm run dev`
