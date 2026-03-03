@@ -51,7 +51,6 @@ export default function CreditorsPage() {
       const item = rows[i];
       const name = String(item.name || "").trim();
       const accountNumber = String(item.accountNumber || "").replace(/\s+/g, "").trim();
-
       if (!name && !accountNumber) continue;
 
       if (accountNumber && (!/^\d{11}$/.test(accountNumber) || !isValidMod11(accountNumber))) {

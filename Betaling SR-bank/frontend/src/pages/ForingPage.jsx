@@ -1,44 +1,96 @@
-﻿import { useEffect, useMemo, useState } from "react";
+﻿import { Fragment, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   extractFilenameFromDisposition,
   formatAmount,
   getTodayIsoDate,
+  hasAllowedCustomerNoteChars,
   isValidAccountNumber,
-  isValidCustomerNoteFormat,
   isValidKid,
   parseCustomerNoteFields,
   parseAmountInput,
 } from "../utils";
 
-const INITIAL_ROWS = 25;
+const INITIAL_ROWS = 5;
 const STEP_ROWS = 5;
+
+function nowIsoTimestamp() {
+  return new Date().toISOString();
+}
+
+function formatRowTimestamp(value) {
+  const iso = String(value || "").trim();
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString("nb-NO", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}
+
+function rowHasUserContent(row) {
+  return Boolean(
+    String(row?.creditor || "").trim() ||
+      String(row?.kid || "").trim() ||
+      String(row?.customerNote || "").trim() ||
+      String(row?.internalNote || "").trim() ||
+      String(row?.kommentar || "").trim() ||
+      String(row?.accountNumber || "").trim() ||
+      String(row?.amount || "").trim() ||
+      String(row?.owner || "").trim() ||
+      String(row?.dueDate || "").trim() ||
+      String(row?.typeKrav || "").trim() ||
+      String(row?.source || "").trim()
+  );
+}
 
 function createEmptyRow(hovedlantaker = "") {
   return {
     creditor: "",
     kid: "",
-    owner: hovedlantaker,
+    owner: "",
+    source: "",
     customerNote: "",
     internalNote: "",
+    kommentar: "",
     accountNumber: "",
     amount: "",
-    dueDate: getTodayIsoDate(),
+    dueDate: "",
+    infridd: true,
+    typeKrav: "",
+    rowUpdatedAt: "",
     boligLaan: false,
   };
 }
 
 function normalizeIncomingRow(row, hovedlantaker = "") {
   const parsedNote = parseCustomerNoteFields(row?.customerNote);
+  const normalizedSource = String(row?.source || "").trim();
+  const hasUserContent = rowHasUserContent(row);
+  const source = ["Inkassoregister", "Rammelån Gjeldsregister", "Nedbetalingslån Gjeldsregister", "annet"].includes(normalizedSource)
+    ? normalizedSource
+    : (hasUserContent ? "annet" : "");
   return {
     creditor: String(row?.creditor || ""),
     kid: String(row?.kid || ""),
-    owner: String(row?.owner || parsedNote.owner || hovedlantaker || ""),
+    owner: String(row?.owner || (hasUserContent ? parsedNote.owner || hovedlantaker || "" : "")),
+    source,
     customerNote: String(row?.customerNote || ""),
     internalNote: String(row?.internalNote || ""),
+    kommentar: String(row?.kommentar || ""),
     accountNumber: String(row?.accountNumber || ""),
     amount: String(row?.amount || ""),
-    dueDate: String(row?.dueDate || getTodayIsoDate()),
+    dueDate: String(row?.dueDate || (hasUserContent ? getTodayIsoDate() : "")),
+    infridd: typeof row?.infridd === "boolean" ? row.infridd : true,
+    typeKrav: ["Pant", "Utlegg", "Inkasso", "Annet"].includes(String(row?.typeKrav || ""))
+      ? String(row.typeKrav)
+      : (hasUserContent ? "Annet" : ""),
+    rowUpdatedAt: String(row?.rowUpdatedAt || (hasUserContent ? nowIsoTimestamp() : "")),
     boligLaan: Boolean(row?.boligLaan),
   };
 }
@@ -51,14 +103,24 @@ export default function ForingPage() {
   const [caseHandler, setCaseHandler] = useState("");
   const [cloNumber, setCloNumber] = useState("");
   const [hovedlantaker, setHovedlantaker] = useState("");
+  const [lantakere, setLantakere] = useState([]);
+  const [innvilgetLaanMedPant, setInnvilgetLaanMedPant] = useState("");
+  const [innvilgetUsikretLaan, setInnvilgetUsikretLaan] = useState("");
   const [etableringshonorar, setEtableringshonorar] = useState("");
   const [foringStatus, setForingStatus] = useState("Pågående");
   const [statusText, setStatusText] = useState("");
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importMode, setImportMode] = useState("inkasso");
+  const [importText, setImportText] = useState("");
+  const [importPreviewRows, setImportPreviewRows] = useState([]);
+  const [importPreviewError, setImportPreviewError] = useState("");
   const [creditors, setCreditors] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isLoaded, setIsLoaded] = useState(false);
 
   useEffect(() => {
     let active = true;
+    setIsLoaded(false);
 
     async function loadPageData() {
       setIsLoading(true);
@@ -85,6 +147,13 @@ export default function ForingPage() {
         setCloNumber(String(foringPayload.cloNumber || ""));
         const loadedHovedlantaker = String(foringPayload.hovedlantaker || "");
         setHovedlantaker(loadedHovedlantaker);
+        setLantakere(
+          Array.isArray(foringPayload.lantakere)
+            ? foringPayload.lantakere.map((value) => String(value || "")).filter((value) => value.trim())
+            : []
+        );
+        setInnvilgetLaanMedPant(String(foringPayload.innvilgetLaanMedPant || ""));
+        setInnvilgetUsikretLaan(String(foringPayload.innvilgetUsikretLaan || ""));
         setEtableringshonorar(String(foringPayload.etableringshonorar || ""));
         setForingStatus(String(foringPayload.status || "Pågående"));
 
@@ -106,6 +175,7 @@ export default function ForingPage() {
         }
 
         setEntries(rows);
+        setIsLoaded(true);
       } catch (error) {
         if (!active) return;
         setStatusText(error.message || "Ukjent feil.");
@@ -120,7 +190,7 @@ export default function ForingPage() {
     };
   }, [foringId]);
 
-  const creditorAccountByName = useMemo(() => {
+  const creditorAccountsByName = useMemo(() => {
     const map = new Map();
     for (const creditor of creditors) {
       const name = String(creditor?.name || "").trim().toLowerCase();
@@ -130,9 +200,16 @@ export default function ForingPage() {
     return map;
   }, [creditors]);
 
+  const ownerOptions = useMemo(() => {
+    const raw = [hovedlantaker, ...lantakere]
+      .map((value) => String(value || "").trim())
+      .filter((value) => value.length > 0);
+    return Array.from(new Set(raw));
+  }, [hovedlantaker, lantakere]);
+
   const summary = useMemo(() => {
     let usedLines = 0;
-    let totalAmount = 0;
+    let plannedAmount = 0;
 
     for (const row of entries) {
       const hasAnyValue =
@@ -147,21 +224,24 @@ export default function ForingPage() {
       usedLines += 1;
 
       const parsed = parseAmountInput(row.amount);
-      if (parsed) totalAmount += parsed;
+      if (parsed && row.infridd) plannedAmount += parsed;
     }
 
-    return { usedLines, totalAmount };
-  }, [entries]);
+    const pantAmount = parseAmountInput(innvilgetLaanMedPant) || 0;
+    const usikretAmount = parseAmountInput(innvilgetUsikretLaan) || 0;
+    const remainingLoanFrame = pantAmount + usikretAmount - plannedAmount;
+
+    return { usedLines, plannedAmount, remainingLoanFrame };
+  }, [entries, innvilgetLaanMedPant, innvilgetUsikretLaan]);
 
   const liveValidation = useMemo(() => {
     const invalidByRow = new Map();
     const messages = [];
 
     entries.forEach((row, index) => {
-      const rowInvalid = { kid: false, accountNumber: false, customerNote: false };
+      const rowInvalid = { kid: false, accountNumber: false };
       const kid = String(row.kid || "").replace(/\s+/g, "").trim();
       const accountNumber = String(row.accountNumber || "").replace(/\s+/g, "").trim();
-      const customerNote = String(row.customerNote || "").trim();
 
       if (kid && !isValidKid(kid)) {
         rowInvalid.kid = true;
@@ -171,11 +251,6 @@ export default function ForingPage() {
       if (accountNumber && !isValidAccountNumber(accountNumber)) {
         rowInvalid.accountNumber = true;
         messages.push(`Linje ${index + 1}: Ugyldig kontonummer.`);
-      }
-
-      if (customerNote && !isValidCustomerNoteFormat(customerNote)) {
-        rowInvalid.customerNote = true;
-        messages.push(`Linje ${index + 1}: Notat til kunde ma ha format "Saksnr: ... | Eier: ...".`);
       }
 
       if (rowInvalid.kid || rowInvalid.accountNumber) {
@@ -194,22 +269,118 @@ export default function ForingPage() {
     return Boolean(liveValidation.invalidByRow.get(rowIndex)?.[field]);
   }
 
+  useEffect(() => {
+    if (!isLoaded) return;
+    if (!caseHandler.trim() || !cloNumber.trim() || !hovedlantaker.trim()) return;
+
+    const timer = window.setTimeout(async () => {
+      try {
+        await saveForingMeta();
+      } catch (error) {
+        setStatusText(error.message || "Ukjent feil.");
+      }
+    }, 700);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [
+    isLoaded,
+    caseHandler,
+    cloNumber,
+    hovedlantaker,
+    lantakere,
+    innvilgetLaanMedPant,
+    innvilgetUsikretLaan,
+    etableringshonorar,
+    foringStatus,
+  ]);
+
+  useEffect(() => {
+    if (!isLoaded) return;
+    if (!caseHandler.trim() || !cloNumber.trim() || !hovedlantaker.trim()) return;
+    if (liveValidation.hasInvalid) return;
+
+    const timer = window.setTimeout(async () => {
+      try {
+        await saveForing();
+      } catch (error) {
+        setStatusText(error.message || "Ukjent feil.");
+      }
+    }, 700);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [
+    isLoaded,
+    entries,
+    caseHandler,
+    cloNumber,
+    hovedlantaker,
+    liveValidation.hasInvalid,
+  ]);
+
+  function withTouchedRow(row, patch) {
+    const next = { ...row, ...patch };
+    const used = rowHasUserContent(next);
+
+    if (used) {
+      if (!String(next.owner || "").trim() && String(hovedlantaker || "").trim()) {
+        next.owner = hovedlantaker;
+      }
+      if (!String(next.source || "").trim()) {
+        next.source = "annet";
+      }
+      if (!String(next.typeKrav || "").trim()) {
+        next.typeKrav = "Annet";
+      }
+      if (!String(next.dueDate || "").trim()) {
+        next.dueDate = getTodayIsoDate();
+      }
+      next.rowUpdatedAt = nowIsoTimestamp();
+      return next;
+    }
+
+    return {
+      ...next,
+      owner: "",
+      source: "",
+      typeKrav: "",
+      dueDate: "",
+      infridd: true,
+      rowUpdatedAt: "",
+    };
+  }
+
   function updateRow(index, patch) {
-    setEntries((prev) => prev.map((row, rowIndex) => (rowIndex === index ? { ...row, ...patch } : row)));
+    setEntries((prev) => prev.map((row, rowIndex) => (rowIndex === index ? withTouchedRow(row, patch) : row)));
   }
 
   function handleHovedlantakerChange(value) {
     const nextValue = value;
     setEntries((prev) =>
       prev.map((row) => {
+        if (!rowHasUserContent(row)) {
+          return row;
+        }
+
         const ownerRaw = String(row.owner || "");
         if (!ownerRaw.trim() || ownerRaw === hovedlantaker) {
-          return { ...row, owner: nextValue };
+          return withTouchedRow(row, { owner: nextValue });
         }
         return row;
       })
     );
     setHovedlantaker(nextValue);
+  }
+
+  function addLantakerField() {
+    setLantakere((prev) => [...prev, ""]);
+  }
+
+  function updateLantaker(index, value) {
+    setLantakere((prev) => prev.map((item, itemIndex) => (itemIndex === index ? value : item)));
   }
 
   function updateBoligLaan(index, value) {
@@ -218,16 +389,35 @@ export default function ForingPage() {
         // Prevent zero selected: at least one row must be marked as boliglan.
         return prev;
       }
-      return prev.map((row, rowIndex) => ({ ...row, boligLaan: rowIndex === index }));
+      return prev.map((row, rowIndex) => {
+        const shouldBeBoligLaan = rowIndex === index;
+        if (row.boligLaan === shouldBeBoligLaan) return row;
+        return withTouchedRow(row, { boligLaan: shouldBeBoligLaan });
+      });
+    });
+  }
+
+  function removeRow(index) {
+    setEntries((prev) => {
+      const next = prev.filter((_, rowIndex) => rowIndex !== index);
+      if (next.length === 0) {
+        return [{ ...createEmptyRow(hovedlantaker), boligLaan: true }];
+      }
+
+      if (!next.some((row) => row.boligLaan)) {
+        next[0] = { ...next[0], boligLaan: true };
+      }
+
+      return next;
     });
   }
 
   function handleCreditorChange(index, value) {
     const key = value.trim().toLowerCase();
-    const predefinedAccount = creditorAccountByName.get(key);
+    const predefinedAccountNumber = creditorAccountsByName.get(key);
     updateRow(index, {
       creditor: value,
-      ...(predefinedAccount ? { accountNumber: predefinedAccount } : {}),
+      ...(predefinedAccountNumber ? { accountNumber: predefinedAccountNumber } : {}),
     });
   }
 
@@ -238,7 +428,7 @@ export default function ForingPage() {
       if (!parsed) return prev;
 
       const next = [...prev];
-      next[index] = { ...row, amount: formatAmount(parsed) };
+      next[index] = withTouchedRow(row, { amount: formatAmount(parsed) });
       return next;
     });
   }
@@ -257,9 +447,341 @@ export default function ForingPage() {
     }
   }
 
+  function handleCustomerNoteChange(index, value) {
+    const kid = String(entries[index]?.kid || "").replace(/\s+/g, "").trim();
+    if (kid && String(value || "").trim()) {
+      window.alert("Kan ikke bruke notat til kunde når man har KID");
+      return;
+    }
+
+    if (!hasAllowedCustomerNoteChars(value)) {
+      window.alert("Notat til kunde inneholder ugyldige tegn. Bruk bokstaver, tall og vanlig tegnsetting.");
+      return;
+    }
+
+    updateRow(index, { customerNote: value });
+  }
+
   function addRows() {
     setEntries((prev) => [...prev, ...Array.from({ length: STEP_ROWS }, () => createEmptyRow(hovedlantaker))]);
     setStatusText(`La til ${STEP_ROWS} nye linjer.`);
+  }
+
+  function isImportTargetEmpty(row) {
+    return !(
+      String(row.creditor || "").trim() ||
+      String(row.kid || "").trim() ||
+      String(row.customerNote || "").trim() ||
+      String(row.internalNote || "").trim() ||
+      String(row.kommentar || "").trim() ||
+      String(row.accountNumber || "").trim() ||
+      String(row.amount || "").trim()
+    );
+  }
+
+  function isLikelyHeaderLine(line) {
+    return /^kreditor\s*\t\s*kontonummer\s*\t\s*kid/i.test(line);
+  }
+
+  function isLikelyAccountNumber(value) {
+    const account = String(value || "").replace(/\s+/g, "");
+    return /^\d{11}$/.test(account);
+  }
+
+  function extractParsedRowFromParts(parts, creditorContext = "") {
+    if (!Array.isArray(parts) || parts.length < 3) return null;
+
+    const cleanParts = parts.map((part) => String(part || "").trim());
+    const first = cleanParts[0] || "";
+    const second = cleanParts[1] || "";
+    const third = cleanParts[2] || "";
+    const fourth = cleanParts[3] || "";
+
+    // Case 1: one-line row with creditor in first column.
+    // Kreditor | Kontonummer | KID | Belop | ...
+    if (!isLikelyAccountNumber(first) && isLikelyAccountNumber(second) && cleanParts.length >= 4) {
+      const creditor = first.replace(/^[\u25B6\u25B8\u25BA\u25CF\u2022]\s*/, "").trim();
+      const accountNumber = second.replace(/\s+/g, "");
+      const kid = third.replace(/\s+/g, "");
+      const parsedAmount = parseAmountInput(fourth.replace(/\s+/g, ""));
+      if (creditor && accountNumber && kid && parsedAmount) {
+        return {
+          creditor,
+          accountNumber,
+          kid,
+          amount: formatAmount(parsedAmount),
+        };
+      }
+      return null;
+    }
+
+    // Case 2: two-line row where creditor is on previous line.
+    // <Kreditor line>
+    // Kontonummer | KID | Belop | ...
+    if (isLikelyAccountNumber(first) && creditorContext) {
+      const creditor = creditorContext.replace(/^[\u25B6\u25B8\u25BA\u25CF\u2022]\s*/, "").trim();
+      const accountNumber = first.replace(/\s+/g, "");
+      const kid = second.replace(/\s+/g, "");
+      const parsedAmount = parseAmountInput(third.replace(/\s+/g, ""));
+      if (creditor && accountNumber && kid && parsedAmount) {
+        return {
+          creditor,
+          accountNumber,
+          kid,
+          amount: formatAmount(parsedAmount),
+        };
+      }
+      return null;
+    }
+
+    return null;
+  }
+
+  function parseGjeldsregisterRows(rawText) {
+    const rawLines = String(rawText || "")
+      .split(/\r?\n/)
+      .map((line) => String(line || "").trim())
+      .filter((line) => line.length > 0);
+
+    if (rawLines.length === 0) return [];
+
+    let headerLineIndex = -1;
+    let headerParts = [];
+    for (let i = 0; i < rawLines.length; i += 1) {
+      if (!rawLines[i].includes("\t")) continue;
+      const parts = rawLines[i].split("\t").map((part) => String(part || "").trim().toLowerCase());
+      if (parts.includes("kreditor") && parts.some((part) => part.includes("rentebærende saldo") || part.includes("rentebaerende saldo"))) {
+        headerLineIndex = i;
+        headerParts = parts;
+        break;
+      }
+    }
+
+    if (headerLineIndex < 0) return [];
+
+    const creditorIndex = headerParts.findIndex((part) => part === "kreditor");
+    const saldoIndex = headerParts.findIndex((part) => part.includes("rentebærende saldo") || part.includes("rentebaerende saldo"));
+
+    if (creditorIndex < 0 || saldoIndex < 0) return [];
+
+    const rows = [];
+    for (let i = headerLineIndex + 1; i < rawLines.length; i += 1) {
+      if (!rawLines[i].includes("\t")) continue;
+      const parts = rawLines[i].split("\t").map((part) => String(part || "").trim());
+      const creditor = String(parts[creditorIndex] || "").trim();
+      const saldoRaw = String(parts[saldoIndex] || "").replace(/kr/gi, "").trim();
+      const parsedAmount = parseAmountInput(saldoRaw);
+
+      if (!creditor || !parsedAmount) continue;
+      rows.push({
+        creditor,
+        accountNumber: "",
+        kid: "",
+        amount: formatAmount(parsedAmount),
+        source: "Rammelån Gjeldsregister",
+      });
+    }
+
+    return rows;
+  }
+
+  function parseNedbetalingslanRows(rawText) {
+    const rawLines = String(rawText || "")
+      .split(/\r?\n/)
+      .map((line) => String(line || "").trim())
+      .filter((line) => line.length > 0);
+
+    if (rawLines.length === 0) return [];
+
+    let headerLineIndex = -1;
+    let headerParts = [];
+    for (let i = 0; i < rawLines.length; i += 1) {
+      if (!rawLines[i].includes("\t")) continue;
+      const parts = rawLines[i].split("\t").map((part) => String(part || "").trim().toLowerCase());
+      if (parts.includes("kreditor") && parts.includes("saldo")) {
+        headerLineIndex = i;
+        headerParts = parts;
+        break;
+      }
+    }
+
+    if (headerLineIndex < 0) return [];
+
+    const creditorIndex = headerParts.findIndex((part) => part === "kreditor");
+    const saldoIndex = headerParts.findIndex((part) => part === "saldo");
+
+    if (creditorIndex < 0 || saldoIndex < 0) return [];
+
+    const rows = [];
+    for (let i = headerLineIndex + 1; i < rawLines.length; i += 1) {
+      if (!rawLines[i].includes("\t")) continue;
+      const parts = rawLines[i].split("\t").map((part) => String(part || "").trim());
+      const creditor = String(parts[creditorIndex] || "").trim();
+      const saldoRaw = String(parts[saldoIndex] || "").replace(/kr/gi, "").trim();
+      const parsedAmount = parseAmountInput(saldoRaw);
+
+      if (!creditor || !parsedAmount) continue;
+      rows.push({
+        creditor,
+        accountNumber: "",
+        kid: "",
+        amount: formatAmount(parsedAmount),
+        source: "Nedbetalingslån Gjeldsregister",
+      });
+    }
+
+    return rows;
+  }
+
+  function parseImportRows(rawText) {
+    const rawLines = String(rawText || "").split(/\r?\n/);
+    const rows = [];
+    let pendingCreditor = "";
+
+    for (const rawLine of rawLines) {
+      const line = String(rawLine || "").replace(/^"+|"+$/g, "").trim();
+      if (!line) continue;
+      if (isLikelyHeaderLine(line)) continue;
+
+      if (line.includes("\t")) {
+        const tabParts = line
+          .split(/\t+/)
+          .map((part) => String(part || "").trim())
+          .filter((part) => part.length > 0);
+
+        const parsedFromTabs = extractParsedRowFromParts(tabParts, pendingCreditor);
+        if (parsedFromTabs) {
+          rows.push(parsedFromTabs);
+          continue;
+        }
+
+        // If line is not parseable as data, treat first column as potential creditor context.
+        if (tabParts[0] && !isLikelyAccountNumber(tabParts[0])) {
+          pendingCreditor = tabParts[0];
+        }
+        continue;
+      }
+
+      // Non-tab line: likely creditor context or fully unstructured single-line fallback.
+      const fallbackSingleLine = line.match(
+        /^\s*[\u25B6\u25B8\u25BA\u25CF\u2022]?\s*(.*?)\s+(\d{11})\s+(\S+)\s+(\d[\d\s.]*[.,]\d{1,2}|\d+)\b/
+      );
+
+      if (fallbackSingleLine) {
+        const parsed = extractParsedRowFromParts(
+          [
+            fallbackSingleLine[1],
+            fallbackSingleLine[2],
+            fallbackSingleLine[3],
+            fallbackSingleLine[4],
+          ],
+          pendingCreditor
+        );
+        if (parsed) {
+          rows.push(parsed);
+          continue;
+        }
+      }
+
+      pendingCreditor = line;
+    }
+
+    return rows;
+  }
+
+  function buildImportPreview() {
+    if (!String(importText || "").trim()) {
+      return { error: "Lim inn minst en linje for import.", rows: [] };
+    }
+
+    const parsedRows =
+      importMode === "gjeld"
+        ? parseGjeldsregisterRows(importText)
+        : importMode === "nedbetaling"
+          ? parseNedbetalingslanRows(importText)
+          : parseImportRows(importText);
+
+    if (parsedRows.length === 0) {
+      return {
+        error:
+          importMode === "gjeld"
+            ? "Ingen gyldige linjer funnet. Sjekk at linjene inneholder kolonnene Kreditor og Rentebærende saldo."
+            : importMode === "nedbetaling"
+              ? "Ingen gyldige linjer funnet. Sjekk at linjene inneholder kolonnene Kreditor og Saldo."
+            : "Ingen gyldige linjer funnet. Sjekk at linjene inneholder Kreditor, Kontonummer, KID og Belop.",
+        rows: [],
+      };
+    }
+
+    return { error: "", rows: parsedRows };
+  }
+
+  function handlePreviewImportFromInkasso() {
+    const preview = buildImportPreview();
+    setImportPreviewRows(preview.rows);
+    setImportPreviewError(preview.error);
+  }
+
+  function handleConfirmImportFromInkasso() {
+    const previewRows = importPreviewRows.length > 0 ? importPreviewRows : buildImportPreview().rows;
+    if (previewRows.length === 0) {
+      setImportPreviewError("Ingen gyldige linjer klare for import.");
+      return;
+    }
+
+    setEntries((prev) => {
+      const next = [...prev];
+
+      for (const parsed of previewRows) {
+        let targetIndex = next.findIndex((row) => isImportTargetEmpty(row));
+        if (targetIndex < 0) {
+          next.push(createEmptyRow(hovedlantaker));
+          targetIndex = next.length - 1;
+        }
+
+        const existing = next[targetIndex];
+        const matchedAccount = String(
+          creditorAccountsByName.get(String(parsed.creditor || "").trim().toLowerCase()) || ""
+        );
+        const importedAccountNumber = importMode === "gjeld" || importMode === "nedbetaling"
+          ? matchedAccount
+          : (parsed.accountNumber || matchedAccount);
+        const importedKid = importMode === "gjeld"
+          ? ""
+          : (importMode === "nedbetaling" ? "" : (parsed.kid || ""));
+        next[targetIndex] = {
+          ...existing,
+          creditor: parsed.creditor,
+          accountNumber: importedAccountNumber,
+          kid: importedKid,
+          source:
+            importMode === "gjeld"
+              ? "Rammelån Gjeldsregister"
+              : (importMode === "nedbetaling" ? "Nedbetalingslån Gjeldsregister" : "Inkassoregister"),
+          customerNote: "",
+          amount: parsed.amount,
+          owner: String(existing.owner || "").trim() || hovedlantaker,
+          dueDate: String(existing.dueDate || "").trim() || getTodayIsoDate(),
+          infridd: true,
+          typeKrav: existing.typeKrav || "Annet",
+          rowUpdatedAt: nowIsoTimestamp(),
+        };
+      }
+
+      return next;
+    });
+
+    setShowImportModal(false);
+    setImportText("");
+    setImportPreviewRows([]);
+    setImportPreviewError("");
+    setStatusText(
+      importMode === "gjeld"
+        ? `Importert ${previewRows.length} linjer fra Rammelån Gjeldsregister.`
+        : importMode === "nedbetaling"
+          ? `Importert ${previewRows.length} linjer fra Nedbetalingslån Gjeldsregister.`
+        : `Importert ${previewRows.length} linjer fra Inkassoregister.`
+    );
   }
 
   async function saveForing(nextStatus) {
@@ -268,8 +790,36 @@ export default function ForingPage() {
       cloNumber: cloNumber.trim(),
       caseHandler: caseHandler.trim(),
       hovedlantaker: hovedlantaker.trim(),
+      lantakere: lantakere.map((value) => String(value || "").trim()).filter((value) => value.length > 0),
+      innvilgetLaanMedPant: innvilgetLaanMedPant.trim(),
+      innvilgetUsikretLaan: innvilgetUsikretLaan.trim(),
       etableringshonorar: etableringshonorar.trim(),
       entries,
+      status: effectiveStatus,
+    };
+
+    const response = await fetch(`/api/foringer/${foringId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({ error: "Ukjent feil." }));
+      throw new Error(body.error || "Kunne ikke lagre foring.");
+    }
+  }
+
+  async function saveForingMeta(nextStatus) {
+    const effectiveStatus = nextStatus || foringStatus;
+    const payload = {
+      cloNumber: cloNumber.trim(),
+      caseHandler: caseHandler.trim(),
+      hovedlantaker: hovedlantaker.trim(),
+      lantakere: lantakere.map((value) => String(value || "").trim()).filter((value) => value.length > 0),
+      innvilgetLaanMedPant: innvilgetLaanMedPant.trim(),
+      innvilgetUsikretLaan: innvilgetUsikretLaan.trim(),
+      etableringshonorar: etableringshonorar.trim(),
       status: effectiveStatus,
     };
 
@@ -292,7 +842,7 @@ export default function ForingPage() {
     }
 
     if (liveValidation.hasInvalid) {
-      setStatusText("Rett ugyldig KID/kontonummer/notat før lagring.");
+      setStatusText("Rett ugyldig KID/kontonummer før lagring.");
       return;
     }
 
@@ -314,20 +864,11 @@ export default function ForingPage() {
     }
 
     if (liveValidation.hasInvalid) {
-      setStatusText("Rett ugyldig KID/kontonummer/notat før XML-generering.");
+      setStatusText("Rett ugyldig KID/kontonummer før XML-generering.");
       return;
     }
 
-    const filteredEntries = entries.filter((row) => {
-      return (
-        row.creditor.trim() ||
-        row.kid.trim() ||
-        row.customerNote.trim() ||
-        row.internalNote.trim() ||
-        row.accountNumber.trim() ||
-        row.amount.trim()
-      );
-    });
+    const filteredEntries = entries.filter((row) => row.creditor.trim() && row.infridd);
 
     if (filteredEntries.length === 0) {
       setStatusText("Fyll ut minst en linje for a generere XML.");
@@ -373,10 +914,166 @@ export default function ForingPage() {
     }
   }
 
+  const rowsToInfris = useMemo(
+    () => entries.map((row, index) => ({ row, index })).filter((item) => item.row.infridd),
+    [entries]
+  );
+
+  const rowsNotToInfris = useMemo(
+    () => entries.map((row, index) => ({ row, index })).filter((item) => !item.row.infridd),
+    [entries]
+  );
+  const isReadOnlyStatus = foringStatus === "Avsluttet" || foringStatus === "Utbetalt";
+
+  function renderEntryRow(index, row, displayNumber) {
+    return (
+      <tr
+        key={`row-${index}`}
+        className={`${row.boligLaan ? "row-boliglaan " : ""}${!row.infridd ? "row-not-infridd " : ""}${!row.creditor.trim() ? "row-empty-creditor" : ""}`.trim()}
+      >
+        <td>
+          <button type="button" className="delete-row-btn" onClick={() => removeRow(index)} disabled={isReadOnlyStatus}>
+            Slett
+          </button>
+        </td>
+        <td>
+          <select
+            value={row.boligLaan ? "Ja" : "Nei"}
+            onChange={(event) => updateBoligLaan(index, event.target.value === "Ja")}
+            disabled={isReadOnlyStatus}
+          >
+            <option value="Ja">Ja</option>
+            <option value="Nei">Nei</option>
+          </select>
+        </td>
+        <td>{displayNumber}</td>
+        <td>
+          <input
+            list="creditor-options"
+            value={row.creditor}
+            onChange={(event) => handleCreditorChange(index, event.target.value)}
+            disabled={isReadOnlyStatus}
+          />
+        </td>
+        <td>
+          <input
+            className={hasInvalidField(index, "kid") ? "input-invalid" : ""}
+            value={row.kid}
+            inputMode="numeric"
+            onChange={(event) => updateRow(index, { kid: event.target.value })}
+            onBlur={() => handleKidBlur(index)}
+            disabled={isReadOnlyStatus}
+          />
+        </td>
+        <td>
+          <input
+            placeholder="Notat til kunde"
+            value={row.customerNote}
+            onChange={(event) => handleCustomerNoteChange(index, event.target.value)}
+            disabled={isReadOnlyStatus}
+          />
+        </td>
+        <td>
+          <input
+            maxLength={140}
+            value={row.internalNote}
+            onChange={(event) => updateRow(index, { internalNote: event.target.value })}
+            disabled={isReadOnlyStatus}
+          />
+        </td>
+        <td>
+          <input
+            className={hasInvalidField(index, "accountNumber") ? "input-invalid" : ""}
+            value={row.accountNumber}
+            inputMode="numeric"
+            onChange={(event) => updateRow(index, { accountNumber: event.target.value })}
+            onBlur={() => handleAccountBlur(index)}
+            disabled={isReadOnlyStatus}
+          />
+        </td>
+        <td>
+          <input
+            value={row.amount}
+            inputMode="decimal"
+            onChange={(event) => updateRow(index, { amount: event.target.value })}
+            onBlur={() => handleAmountBlur(index)}
+            disabled={isReadOnlyStatus}
+          />
+        </td>
+        <td>
+          <input
+            type="date"
+            min={getTodayIsoDate()}
+            value={row.dueDate}
+            onChange={(event) => updateRow(index, { dueDate: event.target.value })}
+            disabled={isReadOnlyStatus}
+          />
+        </td>
+        <td>
+          <select
+            value={row.infridd ? "Ja" : "Nei"}
+            onChange={(event) => updateRow(index, { infridd: event.target.value === "Ja" })}
+            disabled={isReadOnlyStatus}
+          >
+            <option value="Ja">Ja</option>
+            <option value="Nei">Nei</option>
+          </select>
+        </td>
+        <td>
+          <select
+            value={row.typeKrav}
+            onChange={(event) => updateRow(index, { typeKrav: event.target.value })}
+            disabled={isReadOnlyStatus}
+          >
+            <option value="">Velg</option>
+            <option value="Pant">Pant</option>
+            <option value="Utlegg">Utlegg</option>
+            <option value="Inkasso">Inkasso</option>
+            <option value="Annet">Annet</option>
+          </select>
+        </td>
+        <td>
+          <select
+            value={row.owner}
+            onChange={(event) => updateRow(index, { owner: event.target.value })}
+            disabled={isReadOnlyStatus}
+          >
+            {!ownerOptions.includes(row.owner) && row.owner ? (
+              <option value={row.owner}>{row.owner}</option>
+            ) : null}
+            {ownerOptions.map((owner) => (
+              <option key={`owner-pick-${owner}`} value={owner}>{owner}</option>
+            ))}
+          </select>
+        </td>
+        <td>
+          <select
+            value={row.source}
+            onChange={(event) => updateRow(index, { source: event.target.value })}
+            disabled={isReadOnlyStatus}
+          >
+            <option value="">Velg</option>
+            <option value="Inkassoregister">Inkassoregister</option>
+            <option value="Rammelån Gjeldsregister">Rammelån Gjeldsregister</option>
+            <option value="Nedbetalingslån Gjeldsregister">Nedbetalingslån Gjeldsregister</option>
+            <option value="annet">annet</option>
+          </select>
+        </td>
+        <td>
+          <input
+            type="text"
+            value={formatRowTimestamp(row.rowUpdatedAt)}
+            readOnly
+          />
+        </td>
+      </tr>
+    );
+  }
+
   if (isLoading) {
     return (
       <>
-        <h1>Foring</h1>
+        <h1 className="page-title-frame">Kreditorliste</h1>
         <p>Laster foring...</p>
       </>
     );
@@ -384,33 +1081,214 @@ export default function ForingPage() {
 
   return (
     <>
-      <h1>Foring CLO {cloNumber || ""}</h1>
-      <p>Arbeidsdokument for foring. Lagre underveis og generer XML ved behov.</p>
-      <p><Link className="download-link" to="/">Tilbake til foringsoversikt</Link></p>
+      <h1 className="page-title-frame">Kreditorliste CLO {cloNumber || ""}</h1>
       {liveValidation.hasInvalid ? (
         <p className="live-validation">{liveValidation.message}</p>
       ) : null}
 
       <form onSubmit={handleSubmit}>
+        <div className="actions actions-left top-actions">
+          <Link
+            className={`secondary-btn action-link${isReadOnlyStatus ? " disabled-link" : ""}`}
+            to={isReadOnlyStatus ? "#" : `/til-kunde/${foringId}`}
+            onClick={(event) => {
+              if (isReadOnlyStatus) event.preventDefault();
+            }}
+          >
+            Til kunde
+          </Link>
+          <button type="button" className="secondary-btn" onClick={handleSave}>
+            Lagre føring
+          </button>
+          <button type="submit">Generer XML</button>
+        </div>
+
         <datalist id="creditor-options">
           {creditors.map((creditor) => (
             <option key={creditor.id || creditor.name} value={creditor.name || ""} />
           ))}
         </datalist>
-
         <section className="summary-grid">
           <div className="summary-card">
-            <span className="summary-label">Totalt belop</span>
-            <strong>{formatAmount(summary.totalAmount)}</strong>
+            <span className="summary-label">Planlagt utbetalt</span>
+            <strong>{formatAmount(summary.plannedAmount)}</strong>
           </div>
           <div className="summary-card">
             <span className="summary-label">Antall linjer brukt</span>
             <strong>{summary.usedLines}</strong>
           </div>
+          <div
+            className={`summary-card ${
+              summary.remainingLoanFrame < 0
+                ? "remaining-negative"
+                : (summary.remainingLoanFrame > 0 ? "remaining-positive" : "remaining-neutral")
+            }`}
+          >
+            <span className="summary-label">Igjen av total låneramme</span>
+            <strong>{formatAmount(summary.remainingLoanFrame)}</strong>
+          </div>
         </section>
 
+        <div className="actions actions-left">
+          <button
+            type="button"
+            className="secondary-btn"
+            disabled={isReadOnlyStatus}
+            onClick={() => {
+              setImportMode("inkasso");
+              setImportText("");
+              setImportPreviewRows([]);
+              setImportPreviewError("");
+              setShowImportModal(true);
+            }}
+          >
+            Importer saker Inkassoregister
+          </button>
+          <button
+            type="button"
+            className="secondary-btn"
+            disabled={isReadOnlyStatus}
+            onClick={() => {
+              setImportMode("gjeld");
+              setImportText("");
+              setImportPreviewRows([]);
+              setImportPreviewError("");
+              setShowImportModal(true);
+            }}
+          >
+            Importer Rammelån fra Gjeldsregister
+          </button>
+          <button
+            type="button"
+            className="secondary-btn"
+            disabled={isReadOnlyStatus}
+            onClick={() => {
+              setImportMode("nedbetaling");
+              setImportText("");
+              setImportPreviewRows([]);
+              setImportPreviewError("");
+              setShowImportModal(true);
+            }}
+          >
+            Importer Nedbetalingslån fra Gjeldsregister
+          </button>
+        </div>
+
+        {showImportModal ? (
+          <div className="modal-backdrop" role="presentation" onClick={() => setShowImportModal(false)}>
+            <section
+              className="modal-card import-modal-card"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="inkasso-import-title"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <h2 id="inkasso-import-title">
+                {importMode === "gjeld"
+                  ? "Importer Rammelån fra Gjeldsregister"
+                  : (importMode === "nedbetaling" ? "Importer Nedbetalingslån fra Gjeldsregister" : "Importer saker Inkassoregister")}
+              </h2>
+              <p>
+                {importMode === "gjeld"
+                  ? "Lim inn tabell fra Gjeldsregister. Vi leser kun Kreditor og Rentebærende saldo (som Belop). Kreditor med 0,- i rentebærende saldo importeres ikke."
+                  : importMode === "nedbetaling"
+                    ? "Lim inn tabell fra Gjeldsregister. Vi leser kun Kreditor og Saldo (som Belop), ikke Opprinnelig saldo."
+                  : "Lim inn én linje per kreditor. Vi leser Kreditor, Kontonummer, KID og Belop."}
+              </p>
+              <textarea
+                className="import-textarea"
+                value={importText}
+                onChange={(event) => setImportText(event.target.value)}
+                placeholder="Lim inn linjer her..."
+              />
+              {importPreviewError ? <p className="live-validation">{importPreviewError}</p> : null}
+              {importPreviewRows.length > 0 ? (
+                <div className="table-wrap import-preview-table">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>#</th>
+                        <th>Kreditor</th>
+                        <th>Kontonummer</th>
+                        <th>KID</th>
+                        <th>Belop</th>
+                        <th>Kilde</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {importPreviewRows.map((row, index) => (
+                        <tr key={`import-preview-${index}`}>
+                          <td>{index + 1}</td>
+                          <td>{row.creditor}</td>
+                          <td>{row.accountNumber}</td>
+                          <td>{row.kid}</td>
+                          <td>{row.amount}</td>
+                          <td>
+                            {row.source || (
+                              importMode === "gjeld"
+                                ? "Rammelån Gjeldsregister"
+                                : (importMode === "nedbetaling" ? "Nedbetalingslån Gjeldsregister" : "Inkassoregister")
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : null}
+              <div className="actions actions-left modal-actions">
+                <button type="button" className="secondary-btn" onClick={handlePreviewImportFromInkasso}>
+                  Vis forslag
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmImportFromInkasso}
+                  disabled={importPreviewRows.length === 0}
+                >
+                  OK
+                </button>
+                <button
+                  type="button"
+                  className="secondary-btn"
+                  onClick={() => {
+                    setShowImportModal(false);
+                    setImportPreviewRows([]);
+                    setImportPreviewError("");
+                  }}
+                >
+                  Avbryt
+                </button>
+              </div>
+            </section>
+          </div>
+        ) : null}
+
         <section className="meta-grid">
-          <label htmlFor="etableringshonorar">Etableringshonorar</label>
+          <label htmlFor="innvilgetLaanMedPant">Innvilget lån med pant</label>
+          <input
+            id="innvilgetLaanMedPant"
+            name="innvilgetLaanMedPant"
+            type="text"
+            inputMode="decimal"
+            placeholder="0,00"
+            value={innvilgetLaanMedPant}
+            onChange={(event) => setInnvilgetLaanMedPant(event.target.value)}
+            disabled={isReadOnlyStatus}
+          />
+
+          <label htmlFor="innvilgetUsikretLaan">Innvilget usikret lån</label>
+          <input
+            id="innvilgetUsikretLaan"
+            name="innvilgetUsikretLaan"
+            type="text"
+            inputMode="decimal"
+            placeholder="0,00"
+            value={innvilgetUsikretLaan}
+            onChange={(event) => setInnvilgetUsikretLaan(event.target.value)}
+            disabled={isReadOnlyStatus}
+          />
+
+          <label htmlFor="etableringshonorar">Etableringsgebyr</label>
           <input
             id="etableringshonorar"
             name="etableringshonorar"
@@ -419,6 +1297,7 @@ export default function ForingPage() {
             placeholder="0,00"
             value={etableringshonorar}
             onChange={(event) => setEtableringshonorar(event.target.value)}
+            disabled={isReadOnlyStatus}
           />
 
           <label htmlFor="caseHandler">Saksbehandler</label>
@@ -429,6 +1308,7 @@ export default function ForingPage() {
             required
             value={caseHandler}
             onChange={(event) => setCaseHandler(event.target.value)}
+            disabled={isReadOnlyStatus}
           />
 
               <label htmlFor="cloNumber">CLO nummer</label>
@@ -439,6 +1319,7 @@ export default function ForingPage() {
             required
             value={cloNumber}
                 onChange={(event) => setCloNumber(event.target.value)}
+                disabled={isReadOnlyStatus}
               />
 
               <label htmlFor="hovedlantaker">Hovedlåntaker</label>
@@ -449,7 +1330,26 @@ export default function ForingPage() {
                 required
                 value={hovedlantaker}
                 onChange={(event) => handleHovedlantakerChange(event.target.value)}
+                disabled={isReadOnlyStatus}
               />
+
+              <label>Låntaker</label>
+              <div className="lantaker-list">
+                <button type="button" className="plus-btn" onClick={addLantakerField} aria-label="Legg til låntaker" disabled={isReadOnlyStatus}>
+                  +
+                </button>
+                <div className="lantaker-inputs">
+                  {lantakere.map((value, index) => (
+                    <input
+                      key={`lantaker-${index}`}
+                      type="text"
+                      value={value}
+                      onChange={(event) => updateLantaker(index, event.target.value)}
+                      disabled={isReadOnlyStatus}
+                    />
+                  ))}
+                </div>
+              </div>
 
               <label htmlFor="foringStatus">Status</label>
               <select
@@ -468,7 +1368,8 @@ export default function ForingPage() {
           <table>
             <thead>
               <tr>
-                <th>Bolig lan</th>
+                <th>Slett</th>
+                <th>Boliglån</th>
                 <th>#</th>
                 <th>Kreditor</th>
                 <th>KID</th>
@@ -476,100 +1377,48 @@ export default function ForingPage() {
                 <th>Internt notat</th>
                 <th>Kontonummer</th>
                 <th>Belop</th>
-                <th>Eier</th>
                 <th>Dato for utbetaling</th>
+                <th>Skal innfris</th>
+                <th>Type krav</th>
+                <th>Eier</th>
+                <th>Kilde</th>
+                <th>Sist oppdatert</th>
               </tr>
             </thead>
             <tbody>
-              {entries.map((row, index) => (
-                <tr key={`row-${index}`} className={row.boligLaan ? "row-boliglaan" : ""}>
-                  <td>
-                    <select
-                      value={row.boligLaan ? "Ja" : "Nei"}
-                      onChange={(event) => updateBoligLaan(index, event.target.value === "Ja")}
-                    >
-                      <option value="Ja">Ja</option>
-                      <option value="Nei">Nei</option>
-                    </select>
-                  </td>
-                  <td>{index + 1}</td>
-                  <td>
-                    <input
-                      list="creditor-options"
-                      value={row.creditor}
-                      onChange={(event) => handleCreditorChange(index, event.target.value)}
-                    />
-                  </td>
-                  <td>
-                    <input
-                      className={hasInvalidField(index, "kid") ? "input-invalid" : ""}
-                      value={row.kid}
-                      inputMode="numeric"
-                      onChange={(event) => updateRow(index, { kid: event.target.value })}
-                      onBlur={() => handleKidBlur(index)}
-                    />
-                  </td>
-                  <td>
-                    <input
-                      className={hasInvalidField(index, "customerNote") ? "input-invalid" : ""}
-                      placeholder="Saksnr: ... | Eier: ..."
-                      maxLength={35}
-                      value={row.customerNote}
-                      onChange={(event) => updateRow(index, { customerNote: event.target.value })}
-                    />
-                  </td>
-                  <td>
-                    <input
-                      maxLength={140}
-                      value={row.internalNote}
-                      onChange={(event) => updateRow(index, { internalNote: event.target.value })}
-                    />
-                  </td>
-                  <td>
-                    <input
-                      className={hasInvalidField(index, "accountNumber") ? "input-invalid" : ""}
-                      value={row.accountNumber}
-                      inputMode="numeric"
-                      onChange={(event) => updateRow(index, { accountNumber: event.target.value })}
-                      onBlur={() => handleAccountBlur(index)}
-                    />
-                  </td>
-                  <td>
-                    <input
-                      value={row.amount}
-                      inputMode="decimal"
-                      onChange={(event) => updateRow(index, { amount: event.target.value })}
-                      onBlur={() => handleAmountBlur(index)}
-                    />
-                  </td>
-                  <td>
-                    <input
-                      value={row.owner}
-                      onChange={(event) => updateRow(index, { owner: event.target.value })}
-                    />
-                  </td>
-                  <td>
-                    <input
-                      type="date"
-                      min={getTodayIsoDate()}
-                      value={row.dueDate}
-                      onChange={(event) => updateRow(index, { dueDate: event.target.value })}
-                    />
-                  </td>
+              {rowsToInfris.map((item, order) => renderEntryRow(item.index, item.row, order + 1))}
+              {rowsNotToInfris.length > 0 ? (
+                <tr className="section-divider-row">
+                  <td colSpan={15}>Kreditorer som ikke skal innfries</td>
                 </tr>
+              ) : null}
+              {rowsNotToInfris.map((item, order) => (
+                <Fragment key={`non-infridd-${item.index}`}>
+                  {renderEntryRow(item.index, item.row, rowsToInfris.length + order + 1)}
+                  <tr className="comment-row">
+                    <td colSpan={15}>
+                      <div className="comment-cell">
+                        <label htmlFor={`kommentar-${item.index}`}>Kommentar</label>
+                        <input
+                          id={`kommentar-${item.index}`}
+                          type="text"
+                          value={item.row.kommentar || ""}
+                          onChange={(event) => updateRow(item.index, { kommentar: event.target.value })}
+                          disabled={isReadOnlyStatus}
+                        />
+                      </div>
+                    </td>
+                  </tr>
+                </Fragment>
               ))}
             </tbody>
           </table>
         </div>
 
         <div className="actions">
-          <button type="button" className="secondary-btn" onClick={handleSave}>
-            Lagre foring
-          </button>
-          <button type="button" id="add-lines" onClick={addRows}>
+          <button type="button" id="add-lines" onClick={addRows} disabled={isReadOnlyStatus}>
             Flere linjer
           </button>
-          <button type="submit">Generer XML</button>
         </div>
       </form>
 
@@ -577,3 +1426,6 @@ export default function ForingPage() {
     </>
   );
 }
+
+
+

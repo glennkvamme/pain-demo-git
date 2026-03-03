@@ -18,7 +18,6 @@ function SideMenu() {
       {isForingContext ? (
         <>
           <NavLink className={linkClass} to="/">Oversikt</NavLink>
-          <NavLink className={linkClass} to={`/til-kunde/${foringId}`}>Til kunde</NavLink>
         </>
       ) : (
         <>
@@ -42,7 +41,7 @@ function Layout({ children }) {
         <SideMenu />
         <section className="content-area">
           {children}
-          <footer className="page-version">Versjon v2.04</footer>
+          <footer className="page-version">Versjon v.2.0.9</footer>
         </section>
       </div>
     </main>

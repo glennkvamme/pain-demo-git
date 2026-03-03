@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+﻿import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 function formatDate(value) {
@@ -11,7 +11,9 @@ export default function DashboardPage() {
   const [foringer, setForinger] = useState([]);
   const [cloNumber, setCloNumber] = useState("");
   const [caseHandler, setCaseHandler] = useState("");
+  const [showCreateModal, setShowCreateModal] = useState(false);
   const [statusText, setStatusText] = useState("");
+  const [statusFilter, setStatusFilter] = useState("Pågående");
   const navigate = useNavigate();
 
   async function loadForinger() {
@@ -29,9 +31,7 @@ export default function DashboardPage() {
     loadForinger();
   }, []);
 
-  async function createForing(event) {
-    event.preventDefault();
-
+  async function createForing() {
     if (!cloNumber.trim() || !caseHandler.trim()) {
       setStatusText("CLO nummer og saksbehandler ma fylles ut.");
       return;
@@ -55,47 +55,111 @@ export default function DashboardPage() {
 
       const created = await response.json();
       setStatusText("Foring opprettet.");
+      setShowCreateModal(false);
       navigate(`/foring/${created.id}`);
     } catch (error) {
       setStatusText(error.message || "Ukjent feil.");
     }
   }
 
+  function openCreateModal() {
+    setStatusText("");
+    setShowCreateModal(true);
+  }
+
+  function closeCreateModal() {
+    setShowCreateModal(false);
+  }
+
+  async function handleCreateSubmit(event) {
+    event.preventDefault();
+    await createForing();
+  }
+
+  const filteredForinger = useMemo(
+    () => foringer.filter((item) => String(item.status || "Pågående") === statusFilter),
+    [foringer, statusFilter]
+  );
+
   return (
     <>
       <h1>Oversikt</h1>
       <p>Liste over alle foringer. CLO nummer er master for oppfolging av pagaende og ferdige foringer.</p>
 
-      <form onSubmit={createForing}>
-        <section className="meta-grid">
-          <label htmlFor="newCloNumber">Nytt CLO nummer</label>
-          <input
-            id="newCloNumber"
-            name="newCloNumber"
-            type="text"
-            required
-            value={cloNumber}
-            onChange={(event) => setCloNumber(event.target.value)}
-          />
+      <div className="actions actions-left">
+        <button type="button" onClick={openCreateModal}>Opprett ny kreditorliste</button>
+        <button type="button" className="secondary-btn" onClick={loadForinger}>
+          Oppdater liste
+        </button>
+      </div>
 
-          <label htmlFor="newCaseHandler">Saksbehandler</label>
-          <input
-            id="newCaseHandler"
-            name="newCaseHandler"
-            type="text"
-            required
-            value={caseHandler}
-            onChange={(event) => setCaseHandler(event.target.value)}
-          />
-        </section>
+      <div className="actions actions-left">
+        <button
+          type="button"
+          className={statusFilter === "Pågående" ? "" : "secondary-btn"}
+          onClick={() => setStatusFilter("Pågående")}
+        >
+          Pågående saker
+        </button>
+        <button
+          type="button"
+          className={statusFilter === "Utbetalt" ? "" : "secondary-btn"}
+          onClick={() => setStatusFilter("Utbetalt")}
+        >
+          Utbetalte saker
+        </button>
+        <button
+          type="button"
+          className={statusFilter === "Avsluttet" ? "" : "secondary-btn"}
+          onClick={() => setStatusFilter("Avsluttet")}
+        >
+          Avsluttede saker
+        </button>
+      </div>
 
-        <div className="actions actions-left">
-          <button type="submit">Opprett ny foring</button>
-          <button type="button" className="secondary-btn" onClick={loadForinger}>
-            Oppdater liste
-          </button>
+      {showCreateModal ? (
+        <div className="modal-backdrop" role="presentation" onClick={closeCreateModal}>
+          <section
+            className="modal-card"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="new-foring-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h2 id="new-foring-title">Opprett ny kreditorliste</h2>
+            <form onSubmit={handleCreateSubmit}>
+              <section className="meta-grid">
+                <label htmlFor="newCloNumber">Nytt CLO nummer</label>
+                <input
+                  id="newCloNumber"
+                  name="newCloNumber"
+                  type="text"
+                  required
+                  value={cloNumber}
+                  onChange={(event) => setCloNumber(event.target.value)}
+                />
+
+                <label htmlFor="newCaseHandler">Saksbehandler</label>
+                <input
+                  id="newCaseHandler"
+                  name="newCaseHandler"
+                  type="text"
+                  required
+                  value={caseHandler}
+                  onChange={(event) => setCaseHandler(event.target.value)}
+                />
+              </section>
+
+              <div className="actions actions-left modal-actions">
+                <button type="submit">Opprett</button>
+                <button type="button" className="secondary-btn" onClick={closeCreateModal}>
+                  Avbryt
+                </button>
+              </div>
+            </form>
+          </section>
         </div>
-      </form>
+      ) : null}
 
       <div className="table-wrap">
         <table>
@@ -110,12 +174,12 @@ export default function DashboardPage() {
             </tr>
           </thead>
           <tbody>
-            {foringer.length === 0 ? (
+            {filteredForinger.length === 0 ? (
               <tr>
-                <td colSpan={6}>Ingen foringer funnet.</td>
+                <td colSpan={6}>Ingen saker funnet for valgt status.</td>
               </tr>
             ) : (
-              foringer.map((item, index) => (
+              filteredForinger.map((item, index) => (
                 <tr key={item.id || `foring-${index}`}>
                   <td>{index + 1}</td>
                   <td>{item.cloNumber || ""}</td>
@@ -123,8 +187,8 @@ export default function DashboardPage() {
                   <td>{formatDate(item.createdAt)}</td>
                   <td>{item.status || "Pågående"}</td>
                   <td>
-                    <Link className="download-link" to={`/foring/${item.id}`}>
-                      Apne foring
+                    <Link className="table-action-btn" to={`/foring/${item.id}`}>
+                      Åpne kreditorliste
                     </Link>
                   </td>
                 </tr>

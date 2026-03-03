@@ -101,7 +101,7 @@ function parseCustomerNoteFields(value) {
   if (!note) return { reference: "", owner: "", valid: true };
 
   const match = note.match(/^Saksnr:\s*([^|]+)\s*\|\s*Eier:\s*(.+)$/i);
-  if (!match) return { reference: "", owner: "", valid: false };
+  if (!match) return { reference: note, owner: "", valid: true };
 
   const reference = (match[1] || "").trim();
   const owner = (match[2] || "").trim();
@@ -113,10 +113,22 @@ function isValidCustomerNoteFormat(value) {
   return parseCustomerNoteFields(value).valid;
 }
 
+function hasAllowedCustomerNoteChars(value) {
+  const note = String(value || "");
+  for (const ch of note) {
+    if (/[\x00-\x1F\x7F]/.test(ch)) return false;
+    if (/[A-Za-z0-9ÆØÅæøå\s]/.test(ch)) continue;
+    if (".,:;!?()/-+&'\"".includes(ch)) continue;
+    return false;
+  }
+  return true;
+}
+
 export {
   extractFilenameFromDisposition,
   formatAmount,
   getTodayIsoDate,
+  hasAllowedCustomerNoteChars,
   isValidAccountNumber,
   isValidCustomerNoteFormat,
   isValidKid,

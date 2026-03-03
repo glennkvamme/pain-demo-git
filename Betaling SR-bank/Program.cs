@@ -2,7 +2,7 @@ using System.Globalization;
 using System.Security;
 using System.Text;
 using System.Text.Json;
-using System.Text.RegularExpressions;
+using System.Xml;
 
 var options = new WebApplicationOptions
 {
@@ -105,7 +105,13 @@ app.MapPost("/api/foringer", async (HttpRequest request) =>
             CloNumber = cloNumber,
             CaseHandler = caseHandler,
             Hovedlantaker = string.Empty,
+            Lantakere = new List<string>(),
+            InnvilgetLaanMedPant = string.Empty,
+            InnvilgetUsikretLaan = string.Empty,
             Etableringshonorar = string.Empty,
+            FirstPaymentDate = string.Empty,
+            FirstPaymentAmount = string.Empty,
+            FirstPaymentKid = string.Empty,
             CreatedAt = now,
             UpdatedAt = now,
             Status = ForingStatuses.Pagaende,
@@ -175,6 +181,31 @@ app.MapPut("/api/foringer/{id}", async (string id, HttpRequest request) =>
             item.Etableringshonorar = payload.Etableringshonorar.Trim();
         }
 
+        if (payload?.FirstPaymentDate is not null)
+        {
+            item.FirstPaymentDate = payload.FirstPaymentDate.Trim();
+        }
+
+        if (payload?.FirstPaymentAmount is not null)
+        {
+            item.FirstPaymentAmount = payload.FirstPaymentAmount.Trim();
+        }
+
+        if (payload?.FirstPaymentKid is not null)
+        {
+            item.FirstPaymentKid = payload.FirstPaymentKid.Trim();
+        }
+
+        if (payload?.InnvilgetLaanMedPant is not null)
+        {
+            item.InnvilgetLaanMedPant = payload.InnvilgetLaanMedPant.Trim();
+        }
+
+        if (payload?.InnvilgetUsikretLaan is not null)
+        {
+            item.InnvilgetUsikretLaan = payload.InnvilgetUsikretLaan.Trim();
+        }
+
         if (payload?.Hovedlantaker is not null)
         {
             var hovedlantaker = payload.Hovedlantaker.Trim();
@@ -183,6 +214,15 @@ app.MapPut("/api/foringer/{id}", async (string id, HttpRequest request) =>
                 return Results.Json(new { error = "Hovedlantaker ma fylles ut." }, statusCode: 400);
             }
             item.Hovedlantaker = hovedlantaker;
+        }
+
+        if (payload?.Lantakere is not null)
+        {
+            item.Lantakere = payload.Lantakere
+                .Select(value => (value ?? string.Empty).Trim())
+                .Where(value => value.Length > 0)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
         }
 
         if (payload?.Entries is not null)
@@ -281,14 +321,16 @@ app.MapPost("/api/pain001", async (HttpRequest request) =>
         payload = null;
     }
 
-    var entries = payload?.Entries ?? new List<IncomingEntry>();
+    var entries = (payload?.Entries ?? new List<IncomingEntry>())
+        .Where(entry => entry.Infridd)
+        .ToList();
     var caseHandler = (payload?.CaseHandler ?? string.Empty).Trim();
     var cloNumber = (payload?.CloNumber ?? string.Empty).Trim();
     var foringId = (payload?.ForingId ?? string.Empty).Trim();
 
     if (entries.Count == 0)
     {
-        return Results.Json(new { error = "Send inn minst en linje i entries." }, statusCode: 400);
+        return Results.Json(new { error = "Ingen linjer klare for XML. Velg Skal innfris = Ja pa minst en linje." }, statusCode: 400);
     }
 
     if (string.IsNullOrWhiteSpace(caseHandler) || string.IsNullOrWhiteSpace(cloNumber))
@@ -309,6 +351,12 @@ app.MapPost("/api/pain001", async (HttpRequest request) =>
     }
 
     var xml = PainXml.Build(validated);
+    var preflightResult = PainPreflight.Validate(xml);
+    if (preflightResult.Error is not null)
+    {
+        return Results.Json(new { error = $"Pre-flight validering feilet: {preflightResult.Error}" }, statusCode: 400);
+    }
+
     var nowUtc = DateTime.UtcNow;
     var stamp = nowUtc.ToString("o");
     var compactStamp = nowUtc.ToString("yyyyMMddHHmmss");
@@ -498,10 +546,6 @@ sealed class DataStore(string rootPath, string seedRootPath)
 
 static class Validation
 {
-    private static readonly Regex CustomerNotePattern = new(
-        @"^Saksnr:\s*([^|]+)\s*\|\s*Eier:\s*(.+)$",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-
     public static ValidationResult<List<CreditorRecord>> ValidateCreditorsList(List<CreditorRecord>? rawList)
     {
         if (rawList is null)
@@ -588,14 +632,14 @@ static class Validation
             return ValidationResult<ValidatedEntry>.Fail($"Linje {lineNumber}: Ugyldig KID (modulus-sjekk feilet).");
         }
 
-        if (hasCustomerNote && (cleanCustomerNote.Length < 2 || cleanCustomerNote.Length > 35))
+        if (hasCustomerNote && cleanCustomerNote.Length > 280)
         {
-            return ValidationResult<ValidatedEntry>.Fail($"Linje {lineNumber}: Notat til kunde ma vaere mellom 2 og 35 tegn.");
+            return ValidationResult<ValidatedEntry>.Fail($"Linje {lineNumber}: Notat til kunde kan maks vaere 280 tegn.");
         }
 
-        if (hasCustomerNote && !CustomerNotePattern.IsMatch(cleanCustomerNote))
+        if (hasCustomerNote && !CustomerNoteCharacters.IsAllowed(cleanCustomerNote))
         {
-            return ValidationResult<ValidatedEntry>.Fail($"Linje {lineNumber}: Notat til kunde ma ha format \"Saksnr: ... | Eier: ...\".");
+            return ValidationResult<ValidatedEntry>.Fail($"Linje {lineNumber}: Notat til kunde inneholder ugyldige tegn.");
         }
 
         if (!Modulus.IsOnlyDigits(cleanAccountNumber) || cleanAccountNumber.Length != 11 || !Modulus.IsValidMod11(cleanAccountNumber))
@@ -623,7 +667,7 @@ static class Validation
             Creditor = cleanCreditor,
             Kid = cleanKid,
             CustomerNote = cleanCustomerNote,
-            EndToEndId = hasKid ? cleanKid : cleanCustomerNote,
+            EndToEndId = hasKid ? cleanKid : $"NOTE{lineNumber:D4}",
             InternalNote = cleanInternalNote,
             AccountNumber = cleanAccountNumber,
             Amount = formattedAmount,
@@ -709,6 +753,34 @@ static class DueDate
     }
 }
 
+static class CustomerNoteCharacters
+{
+    public static bool IsAllowed(string value)
+    {
+        foreach (var c in value)
+        {
+            if (char.IsControl(c))
+            {
+                return false;
+            }
+
+            if (char.IsLetterOrDigit(c) || char.IsWhiteSpace(c))
+            {
+                continue;
+            }
+
+            if (".,:;!?()/-+&'\"".Contains(c))
+            {
+                continue;
+            }
+
+            return false;
+        }
+
+        return true;
+    }
+}
+
 static class PainXml
 {
     private const string PayerName = "Kraft Bank ASA";
@@ -780,8 +852,6 @@ static class PainXml
 
     private static string BuildPaymentInfo(string stamp, int index, string dueDate, List<ValidatedEntry> transactions)
     {
-        var ctrlSum = transactions.Sum(tx => decimal.Parse(tx.Amount, CultureInfo.InvariantCulture))
-            .ToString("0.00", CultureInfo.InvariantCulture);
         var transactionsXml = string.Join('\n', transactions.Select(BuildTransaction));
 
         return $"""
@@ -790,9 +860,13 @@ static class PainXml
       <PmtMtd>TRF</PmtMtd>
       <PmtTpInf>
         <InstrPrty>NORM</InstrPrty>
+        <SvcLvl>
+          <Cd>NURG</Cd>
+        </SvcLvl>
+        <CtgyPurp>
+          <Cd>SUPP</Cd>
+        </CtgyPurp>
       </PmtTpInf>
-      <NbOfTxs>{transactions.Count}</NbOfTxs>
-      <CtrlSum>{Escape(ctrlSum)}</CtrlSum>
       <ReqdExctnDt>{Escape(dueDate)}</ReqdExctnDt>
       <Dbtr>
         <Nm>{Escape(PayerName)}</Nm>
@@ -826,7 +900,6 @@ static class PainXml
           <BIC>SPRONO22</BIC>
         </FinInstnId>
       </DbtrAgt>
-      <ChrgBr>SLEV</ChrgBr>
       {transactionsXml}
     </PmtInf>
 """;
@@ -834,29 +907,7 @@ static class PainXml
 
     private static string BuildTransaction(ValidatedEntry tx)
     {
-        var remittanceXml = tx.Kid.Length > 0
-            ? $"""
-<RmtInf>
-          <Strd>
-            <CdtrRefInf>
-              <Tp>
-                <CdOrPrtry>
-                  <Cd>SCOR</Cd>
-                </CdOrPrtry>
-              </Tp>
-              <Ref>{Escape(tx.Kid)}</Ref>
-            </CdtrRefInf>
-          </Strd>
-        </RmtInf>
-"""
-            : (tx.CustomerNote.Length > 0
-                ? $"""
-<RmtInf>
-          <Ustrd>{Escape(tx.CustomerNote)}</Ustrd>
-        </RmtInf>
-"""
-                : string.Empty);
-
+        var remittanceXml = BuildRemittanceXml(tx);
         var supplementaryDataXml = tx.InternalNote.Length > 0
             ? $"""
 <SplmtryData>
@@ -876,9 +927,6 @@ static class PainXml
         <Amt>
           <InstdAmt Ccy="NOK">{Escape(tx.Amount)}</InstdAmt>
         </Amt>
-        <CdtrAgt>
-          <FinInstnId/>
-        </CdtrAgt>
         <Cdtr>
           <Nm>{Escape(tx.Creditor)}</Nm>
           <PstlAdr>
@@ -901,9 +949,185 @@ static class PainXml
 """;
     }
 
+    private static string BuildRemittanceXml(ValidatedEntry tx)
+    {
+        // Each line is either KID (structured) or customer note (unstructured), never both.
+        if (tx.Kid.Length > 0)
+        {
+            return $"""
+<RmtInf>
+          <Strd>
+            <CdtrRefInf>
+              <Tp>
+                <CdOrPrtry>
+                  <Cd>SCOR</Cd>
+                </CdOrPrtry>
+              </Tp>
+              <Ref>{Escape(tx.Kid)}</Ref>
+            </CdtrRefInf>
+          </Strd>
+        </RmtInf>
+""";
+        }
+
+        if (tx.CustomerNote.Length > 0)
+        {
+            return $"""
+<RmtInf>
+          <Ustrd>{Escape(tx.CustomerNote)}</Ustrd>
+        </RmtInf>
+""";
+        }
+
+        return string.Empty;
+    }
+
     private static string Escape(string value)
     {
         return SecurityElement.Escape(value) ?? string.Empty;
+    }
+}
+
+static class PainPreflight
+{
+    private const string PainNamespace = "urn:iso:std:iso:20022:tech:xsd:pain.001.001.03";
+
+    public static ValidationResult<bool> Validate(string xml)
+    {
+        var doc = new XmlDocument();
+        try
+        {
+            doc.LoadXml(xml);
+        }
+        catch (Exception ex)
+        {
+            return ValidationResult<bool>.Fail($"Ugyldig XML: {ex.Message}");
+        }
+
+        var ns = new XmlNamespaceManager(doc.NameTable);
+        ns.AddNamespace("p", PainNamespace);
+
+        var root = doc.SelectSingleNode("/p:Document", ns);
+        if (root is null)
+        {
+            return ValidationResult<bool>.Fail("Mangler Document-root med forventet namespace.");
+        }
+
+        var txNodes = doc.SelectNodes("//p:CdtTrfTxInf", ns);
+        var txCount = txNodes?.Count ?? 0;
+        if (txCount == 0)
+        {
+            return ValidationResult<bool>.Fail("Ingen CdtTrfTxInf funnet.");
+        }
+
+        var grpNbOfTxsText = doc.SelectSingleNode("//p:GrpHdr/p:NbOfTxs", ns)?.InnerText;
+        if (!int.TryParse(grpNbOfTxsText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var grpNbOfTxs) || grpNbOfTxs != txCount)
+        {
+            return ValidationResult<bool>.Fail($"GrpHdr/NbOfTxs ({grpNbOfTxsText ?? "mangler"}) matcher ikke antall transaksjoner ({txCount}).");
+        }
+
+        var sum = 0m;
+        foreach (XmlNode tx in txNodes!)
+        {
+            var amountText = tx.SelectSingleNode("p:Amt/p:InstdAmt", ns)?.InnerText;
+            if (!decimal.TryParse(amountText, NumberStyles.Number, CultureInfo.InvariantCulture, out var amount))
+            {
+                return ValidationResult<bool>.Fail("Fant transaksjon med ugyldig eller manglende InstdAmt.");
+            }
+
+            sum += amount;
+        }
+
+        var grpCtrlSumText = doc.SelectSingleNode("//p:GrpHdr/p:CtrlSum", ns)?.InnerText;
+        if (!decimal.TryParse(grpCtrlSumText, NumberStyles.Number, CultureInfo.InvariantCulture, out var grpCtrlSum))
+        {
+            return ValidationResult<bool>.Fail("GrpHdr/CtrlSum mangler eller har ugyldig format.");
+        }
+
+        if (grpCtrlSum != sum)
+        {
+            return ValidationResult<bool>.Fail($"GrpHdr/CtrlSum ({grpCtrlSum.ToString("0.00", CultureInfo.InvariantCulture)}) matcher ikke sum av transaksjoner ({sum.ToString("0.00", CultureInfo.InvariantCulture)}).");
+        }
+
+        var pmtInfos = doc.SelectNodes("//p:PmtInf", ns);
+        if (pmtInfos is null || pmtInfos.Count == 0)
+        {
+            return ValidationResult<bool>.Fail("Ingen PmtInf funnet.");
+        }
+
+        foreach (XmlNode pmtInf in pmtInfos)
+        {
+            if (pmtInf.SelectSingleNode("p:NbOfTxs", ns) is not null)
+            {
+                return ValidationResult<bool>.Fail("PmtInf/NbOfTxs skal ikke sendes i denne bankprofilen.");
+            }
+
+            if (pmtInf.SelectSingleNode("p:CtrlSum", ns) is not null)
+            {
+                return ValidationResult<bool>.Fail("PmtInf/CtrlSum skal ikke sendes i denne bankprofilen.");
+            }
+
+            if (pmtInf.SelectSingleNode("p:ChrgBr", ns) is not null)
+            {
+                return ValidationResult<bool>.Fail("PmtInf/ChrgBr skal ikke sendes for lokal profil.");
+            }
+
+            var svcLvl = pmtInf.SelectSingleNode("p:PmtTpInf/p:SvcLvl/p:Cd", ns)?.InnerText;
+            if (!string.Equals(svcLvl, "NURG", StringComparison.Ordinal))
+            {
+                return ValidationResult<bool>.Fail("PmtTpInf/SvcLvl/Cd ma vaere NURG.");
+            }
+
+            var ctgyPurp = pmtInf.SelectSingleNode("p:PmtTpInf/p:CtgyPurp/p:Cd", ns)?.InnerText;
+            if (!string.Equals(ctgyPurp, "SUPP", StringComparison.Ordinal))
+            {
+                return ValidationResult<bool>.Fail("PmtTpInf/CtgyPurp/Cd ma vaere SUPP.");
+            }
+        }
+
+        for (var i = 0; i < txNodes!.Count; i += 1)
+        {
+            var tx = txNodes[i]!;
+            var line = i + 1;
+
+            if (tx.SelectSingleNode("p:CdtrAgt", ns) is not null)
+            {
+                return ValidationResult<bool>.Fail($"Linje {line}: CdtrAgt skal ikke sendes uten gyldig innhold.");
+            }
+
+            var hasStrd = tx.SelectSingleNode("p:RmtInf/p:Strd", ns) is not null;
+            var hasUstrd = tx.SelectSingleNode("p:RmtInf/p:Ustrd", ns) is not null;
+
+            if (hasStrd == hasUstrd)
+            {
+                return ValidationResult<bool>.Fail($"Linje {line}: RmtInf ma vaere enten Strd (KID) eller Ustrd (melding).");
+            }
+
+            if (hasStrd)
+            {
+                var refCode = tx.SelectSingleNode("p:RmtInf/p:Strd/p:CdtrRefInf/p:Tp/p:CdOrPrtry/p:Cd", ns)?.InnerText;
+                if (!string.Equals(refCode, "SCOR", StringComparison.Ordinal))
+                {
+                    return ValidationResult<bool>.Fail($"Linje {line}: Strukturert KID ma bruke CdtrRefInf/Tp/CdOrPrtry/Cd = SCOR.");
+                }
+
+                var kidRef = tx.SelectSingleNode("p:RmtInf/p:Strd/p:CdtrRefInf/p:Ref", ns)?.InnerText ?? string.Empty;
+                if (kidRef.Length < 2 || kidRef.Length > 25 || !kidRef.All(char.IsDigit))
+                {
+                    return ValidationResult<bool>.Fail($"Linje {line}: KID-referanse ma vaere 2-25 sifre.");
+                }
+            }
+            else
+            {
+                var note = tx.SelectSingleNode("p:RmtInf/p:Ustrd", ns)?.InnerText ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(note) || note.Length > 280)
+                {
+                    return ValidationResult<bool>.Fail($"Linje {line}: Ustrukturert melding ma vaere 1-280 tegn.");
+                }
+            }
+        }
+
+        return ValidationResult<bool>.Ok(true);
     }
 }
 
@@ -929,11 +1153,16 @@ sealed class IncomingEntry
     public string? Creditor { get; set; }
     public string? Kid { get; set; }
     public string? Owner { get; set; }
+    public string? Source { get; set; }
     public string? CustomerNote { get; set; }
     public string? InternalNote { get; set; }
+    public string? Kommentar { get; set; }
     public string? AccountNumber { get; set; }
     public string? Amount { get; set; }
     public string? DueDate { get; set; }
+    public string? TypeKrav { get; set; }
+    public string? RowUpdatedAt { get; set; }
+    public bool Infridd { get; set; } = true;
     public bool BoligLaan { get; set; }
 }
 
@@ -953,7 +1182,13 @@ sealed class UpdateForingRequest
     public string? CloNumber { get; set; }
     public string? CaseHandler { get; set; }
     public string? Hovedlantaker { get; set; }
+    public List<string>? Lantakere { get; set; }
+    public string? InnvilgetLaanMedPant { get; set; }
+    public string? InnvilgetUsikretLaan { get; set; }
     public string? Etableringshonorar { get; set; }
+    public string? FirstPaymentDate { get; set; }
+    public string? FirstPaymentAmount { get; set; }
+    public string? FirstPaymentKid { get; set; }
     public string? Status { get; set; }
     public List<IncomingEntry>? Entries { get; set; }
 }
@@ -982,7 +1217,13 @@ sealed class ForingDocument
     public string CloNumber { get; set; } = string.Empty;
     public string CaseHandler { get; set; } = string.Empty;
     public string Hovedlantaker { get; set; } = string.Empty;
+    public List<string> Lantakere { get; set; } = new();
+    public string InnvilgetLaanMedPant { get; set; } = string.Empty;
+    public string InnvilgetUsikretLaan { get; set; } = string.Empty;
     public string Etableringshonorar { get; set; } = string.Empty;
+    public string FirstPaymentDate { get; set; } = string.Empty;
+    public string FirstPaymentAmount { get; set; } = string.Empty;
+    public string FirstPaymentKid { get; set; } = string.Empty;
     public string? CreatedAt { get; set; }
     public string? UpdatedAt { get; set; }
     public string Status { get; set; } = ForingStatuses.Pagaende;
