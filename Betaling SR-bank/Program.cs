@@ -17,8 +17,20 @@ if (string.IsNullOrWhiteSpace(storageRootPath))
 {
     storageRootPath = app.Environment.ContentRootPath;
 }
-var dataStore = new DataStore(storageRootPath, app.Environment.ContentRootPath);
-dataStore.EnsureStores();
+DataStore dataStore;
+try
+{
+    dataStore = new DataStore(storageRootPath, app.Environment.ContentRootPath);
+    dataStore.EnsureStores();
+}
+catch (Exception ex)
+{
+    // Keep service alive on hosts where APP_STORAGE_ROOT is mounted with restrictive permissions.
+    Console.Error.WriteLine($"[startup] Kunne ikke initialisere APP_STORAGE_ROOT '{storageRootPath}': {ex.Message}");
+    Console.Error.WriteLine("[startup] Faller tilbake til ContentRootPath for datalagring.");
+    dataStore = new DataStore(app.Environment.ContentRootPath, app.Environment.ContentRootPath);
+    dataStore.EnsureStores();
+}
 
 app.UseDefaultFiles();
 app.UseStaticFiles();
@@ -114,6 +126,7 @@ app.MapPost("/api/foringer", async (HttpRequest request) =>
             FirstPaymentKid = string.Empty,
             CreatedAt = now,
             UpdatedAt = now,
+            LastAssignedLineNumber = 0,
             Status = ForingStatuses.Pagaende,
             Entries = new List<IncomingEntry>()
         };
@@ -227,7 +240,33 @@ app.MapPut("/api/foringer/{id}", async (string id, HttpRequest request) =>
 
         if (payload?.Entries is not null)
         {
+            var nextLineNumber = Math.Max(
+                item.LastAssignedLineNumber,
+                item.Entries.Select(entry => entry.LineNumber).DefaultIfEmpty(0).Max());
+
+            foreach (var entry in payload.Entries)
+            {
+                if (entry.LineNumber > nextLineNumber)
+                {
+                    nextLineNumber = entry.LineNumber;
+                    continue;
+                }
+
+                if (entry.LineNumber <= 0 && EntryUsage.HasUserContent(entry))
+                {
+                    nextLineNumber += 1;
+                    entry.LineNumber = nextLineNumber;
+                }
+            }
+
+            item.LastAssignedLineNumber = nextLineNumber;
             item.Entries = payload.Entries;
+        }
+
+        if (payload?.LastAssignedLineNumber is int lastAssignedLineNumber &&
+            lastAssignedLineNumber > item.LastAssignedLineNumber)
+        {
+            item.LastAssignedLineNumber = lastAssignedLineNumber;
         }
 
         if (payload?.Status is not null)
@@ -338,10 +377,15 @@ app.MapPost("/api/pain001", async (HttpRequest request) =>
         return Results.Json(new { error = "Saksbehandler og CLO nummer ma fylles ut." }, statusCode: 400);
     }
 
+    if (cloNumber.Length > 30)
+    {
+        return Results.Json(new { error = "CLO nummer kan maks vaere 30 tegn for a bygge gyldig EndToEndId." }, statusCode: 400);
+    }
+
     var validated = new List<ValidatedEntry>();
     for (var i = 0; i < entries.Count; i += 1)
     {
-        var result = Validation.ValidateEntry(entries[i], i + 1);
+        var result = Validation.ValidateEntry(entries[i], i + 1, cloNumber);
         if (result.Error is not null)
         {
             return Results.Json(new { error = result.Error }, statusCode: 400);
@@ -598,7 +642,7 @@ static class Validation
         };
     }
 
-    public static ValidationResult<ValidatedEntry> ValidateEntry(IncomingEntry entry, int lineNumber)
+    public static ValidationResult<ValidatedEntry> ValidateEntry(IncomingEntry entry, int lineNumber, string cloNumber)
     {
         var cleanCreditor = (entry.Creditor ?? string.Empty).Trim();
         var cleanKid = string.Concat((entry.Kid ?? string.Empty).Where(c => !char.IsWhiteSpace(c)));
@@ -609,6 +653,7 @@ static class Validation
         var hasKid = cleanKid.Length > 0;
         var hasCustomerNote = cleanCustomerNote.Length > 0;
         var formattedAmount = Amount.TryFormat(entry.Amount);
+        var lockedLineNumber = entry.LineNumber > 0 ? entry.LineNumber : lineNumber;
 
         if (string.IsNullOrWhiteSpace(cleanCreditor))
         {
@@ -662,12 +707,17 @@ static class Validation
             return ValidationResult<ValidatedEntry>.Fail($"Linje {lineNumber}: Internt notat kan maks vaere 140 tegn.");
         }
 
+        if (lockedLineNumber > 9999)
+        {
+            return ValidationResult<ValidatedEntry>.Fail($"Linje {lineNumber}: Linjenummer ma vaere mellom 1 og 9999.");
+        }
+
         return ValidationResult<ValidatedEntry>.Ok(new ValidatedEntry
         {
             Creditor = cleanCreditor,
             Kid = cleanKid,
             CustomerNote = cleanCustomerNote,
-            EndToEndId = hasKid ? cleanKid : $"NOTE{lineNumber:D4}",
+            EndToEndId = $"{cloNumber.Trim()}_{lockedLineNumber:D4}",
             InternalNote = cleanInternalNote,
             AccountNumber = cleanAccountNumber,
             Amount = formattedAmount,
@@ -814,6 +864,24 @@ static class DueDate
         }
 
         return dueDate >= DateOnly.FromDateTime(DateTime.Today);
+    }
+}
+
+static class EntryUsage
+{
+    public static bool HasUserContent(IncomingEntry entry)
+    {
+        return !string.IsNullOrWhiteSpace(entry.Creditor) ||
+               !string.IsNullOrWhiteSpace(entry.Kid) ||
+               !string.IsNullOrWhiteSpace(entry.CustomerNote) ||
+               !string.IsNullOrWhiteSpace(entry.InternalNote) ||
+               !string.IsNullOrWhiteSpace(entry.Kommentar) ||
+               !string.IsNullOrWhiteSpace(entry.AccountNumber) ||
+               !string.IsNullOrWhiteSpace(entry.Amount) ||
+               !string.IsNullOrWhiteSpace(entry.Owner) ||
+               !string.IsNullOrWhiteSpace(entry.DueDate) ||
+               !string.IsNullOrWhiteSpace(entry.TypeKrav) ||
+               !string.IsNullOrWhiteSpace(entry.Source);
     }
 }
 
@@ -1261,6 +1329,7 @@ sealed class IncomingEntry
     public string? AccountNumber { get; set; }
     public string? Amount { get; set; }
     public string? DueDate { get; set; }
+    public int LineNumber { get; set; }
     public string? TypeKrav { get; set; }
     public string? RowUpdatedAt { get; set; }
     public bool Infridd { get; set; } = true;
@@ -1290,6 +1359,7 @@ sealed class UpdateForingRequest
     public string? FirstPaymentDate { get; set; }
     public string? FirstPaymentAmount { get; set; }
     public string? FirstPaymentKid { get; set; }
+    public int? LastAssignedLineNumber { get; set; }
     public string? Status { get; set; }
     public List<IncomingEntry>? Entries { get; set; }
 }
@@ -1325,6 +1395,7 @@ sealed class ForingDocument
     public string FirstPaymentDate { get; set; } = string.Empty;
     public string FirstPaymentAmount { get; set; } = string.Empty;
     public string FirstPaymentKid { get; set; } = string.Empty;
+    public int LastAssignedLineNumber { get; set; }
     public string? CreatedAt { get; set; }
     public string? UpdatedAt { get; set; }
     public string Status { get; set; } = ForingStatuses.Pagaende;

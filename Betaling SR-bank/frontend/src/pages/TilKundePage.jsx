@@ -1,8 +1,9 @@
-﻿import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { formatAmount, isValidKid, parseAmountInput, parseCustomerNoteFields } from "../utils";
 
 const FIRST_PAYMENT_ACCOUNT = "3207 22 78835";
+const AUTOSAVE_DELAY_MS = 1500;
 
 function getDefaultFirstPaymentDate() {
   const now = new Date();
@@ -38,6 +39,9 @@ export default function TilKundePage() {
   const [firstPaymentDate, setFirstPaymentDate] = useState(() => getDefaultFirstPaymentDate());
   const [firstPaymentAmount, setFirstPaymentAmount] = useState("");
   const [firstPaymentKid, setFirstPaymentKid] = useState("");
+  const [saveTrigger, setSaveTrigger] = useState(0);
+  const lastSavedSignatureRef = useRef("");
+  const blurSaveRequestedRef = useRef(false);
 
   useEffect(() => {
     let active = true;
@@ -74,34 +78,58 @@ export default function TilKundePage() {
     };
   }, [foringId]);
 
+  function buildFirstPaymentPayload() {
+    return {
+      firstPaymentDate: String(firstPaymentDate || "").trim(),
+      firstPaymentAmount: String(firstPaymentAmount || "").trim(),
+      firstPaymentKid: String(firstPaymentKid || "").replace(/\s+/g, "").trim(),
+    };
+  }
+
+  function requestBlurSave() {
+    blurSaveRequestedRef.current = true;
+    setSaveTrigger((value) => value + 1);
+  }
+
   useEffect(() => {
     if (!isLoaded) return;
+    lastSavedSignatureRef.current = JSON.stringify(buildFirstPaymentPayload());
+  }, [isLoaded]);
+
+  useEffect(() => {
+    if (!isLoaded) return;
+    const immediate = blurSaveRequestedRef.current;
+    blurSaveRequestedRef.current = false;
 
     const timer = window.setTimeout(async () => {
       try {
+        const payload = buildFirstPaymentPayload();
+        const signature = JSON.stringify(payload);
+        if (signature === lastSavedSignatureRef.current) {
+          return;
+        }
+
         const response = await fetch(`/api/foringer/${foringId}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            firstPaymentDate: String(firstPaymentDate || "").trim(),
-            firstPaymentAmount: String(firstPaymentAmount || "").trim(),
-            firstPaymentKid: String(firstPaymentKid || "").replace(/\s+/g, "").trim(),
-          }),
+          body: JSON.stringify(payload),
         });
 
         if (!response.ok) {
           const body = await response.json().catch(() => ({ error: "Ukjent feil." }));
           throw new Error(body.error || "Kunne ikke lagre Første innbetaling.");
         }
+
+        lastSavedSignatureRef.current = signature;
       } catch (error) {
         setStatusText(error.message || "Ukjent feil.");
       }
-    }, 450);
+    }, immediate ? 0 : AUTOSAVE_DELAY_MS);
 
     return () => {
       window.clearTimeout(timer);
     };
-  }, [foringId, isLoaded, firstPaymentDate, firstPaymentAmount, firstPaymentKid]);
+  }, [foringId, isLoaded, firstPaymentDate, firstPaymentAmount, firstPaymentKid, saveTrigger]);
 
   const listRows = useMemo(() => {
     return rows
@@ -288,6 +316,7 @@ export default function TilKundePage() {
               type="date"
               value={firstPaymentDate}
               onChange={(event) => setFirstPaymentDate(event.target.value)}
+              onBlur={requestBlurSave}
             />
           </div>
           <div className="first-payment-row">
@@ -299,6 +328,7 @@ export default function TilKundePage() {
               placeholder="0,00"
               value={firstPaymentAmount}
               onChange={(event) => setFirstPaymentAmount(event.target.value)}
+              onBlur={requestBlurSave}
             />
           </div>
           <div className="first-payment-row">
@@ -314,6 +344,7 @@ export default function TilKundePage() {
                 if (kid && !isValidKid(kid)) {
                   window.alert("Ugyldig KID i Første innbetaling (modulus-sjekk feilet).");
                 }
+                requestBlurSave();
               }}
             />
           </div>

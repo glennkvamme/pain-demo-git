@@ -1,4 +1,4 @@
-﻿import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   extractFilenameFromDisposition,
@@ -13,6 +13,7 @@ import {
 
 const INITIAL_ROWS = 5;
 const STEP_ROWS = 5;
+const AUTOSAVE_DELAY_MS = 1500;
 
 function nowIsoTimestamp() {
   return new Date().toISOString();
@@ -67,6 +68,7 @@ function createEmptyRow(hovedlantaker = "") {
     accountNumber: "",
     amount: "",
     dueDate: "",
+    lineNumber: null,
     infridd: true,
     typeKrav: "",
     rowUpdatedAt: "",
@@ -92,6 +94,7 @@ function normalizeIncomingRow(row, hovedlantaker = "") {
     accountNumber: String(row?.accountNumber || ""),
     amount: String(row?.amount || ""),
     dueDate: String(row?.dueDate || (hasUserContent ? getTodayIsoDate() : "")),
+    lineNumber: Number.isInteger(row?.lineNumber) && row.lineNumber > 0 ? row.lineNumber : null,
     infridd: typeof row?.infridd === "boolean" ? row.infridd : true,
     typeKrav: ["Pant", "Utlegg", "Inkasso", "Annet"].includes(String(row?.typeKrav || ""))
       ? String(row.typeKrav)
@@ -99,6 +102,36 @@ function normalizeIncomingRow(row, hovedlantaker = "") {
     rowUpdatedAt: String(row?.rowUpdatedAt || (hasUserContent ? nowIsoTimestamp() : "")),
     boligLaan: Boolean(row?.boligLaan),
   };
+}
+
+function ensureLockedLineNumbers(rows, nextLineNumberRef) {
+  const nextRows = rows.map((row) => ({ ...row }));
+  let nextLineNumber = Number(nextLineNumberRef?.current || 1);
+  if (!Number.isInteger(nextLineNumber) || nextLineNumber < 1) {
+    nextLineNumber = 1;
+  }
+
+  for (const row of nextRows) {
+    const existingLineNumber = Number(row?.lineNumber || 0);
+    if (Number.isInteger(existingLineNumber) && existingLineNumber >= nextLineNumber) {
+      nextLineNumber = existingLineNumber + 1;
+    }
+  }
+
+  for (let i = 0; i < nextRows.length; i += 1) {
+    const row = nextRows[i];
+    const hasLineNumber = Number.isInteger(row.lineNumber) && row.lineNumber > 0;
+    if (hasLineNumber) continue;
+    if (!rowHasUserContent(row)) continue;
+    row.lineNumber = nextLineNumber;
+    nextLineNumber += 1;
+  }
+
+  if (nextLineNumberRef) {
+    nextLineNumberRef.current = nextLineNumber;
+  }
+
+  return nextRows;
 }
 
 export default function ForingPage() {
@@ -123,6 +156,13 @@ export default function ForingPage() {
   const [creditors, setCreditors] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isLoaded, setIsLoaded] = useState(false);
+  const [metaSaveTrigger, setMetaSaveTrigger] = useState(0);
+  const [entrySaveTrigger, setEntrySaveTrigger] = useState(0);
+  const lastSavedMetaSignatureRef = useRef("");
+  const lastSavedForingSignatureRef = useRef("");
+  const blurMetaSaveRequestedRef = useRef(false);
+  const blurEntrySaveRequestedRef = useRef(false);
+  const nextLineNumberRef = useRef(1);
 
   useEffect(() => {
     let active = true;
@@ -180,7 +220,14 @@ export default function ForingPage() {
           rows = rows.map((row, index) => ({ ...row, boligLaan: index === normalizedIndex }));
         }
 
-        setEntries(rows);
+        const maxLoadedLineNumber = rows.reduce((max, row) => {
+          const value = Number(row?.lineNumber || 0);
+          return Number.isInteger(value) && value > max ? value : max;
+        }, 0);
+        const persistedLastAssigned = Number(foringPayload?.lastAssignedLineNumber || 0);
+        const lastAssigned = Math.max(maxLoadedLineNumber, Number.isInteger(persistedLastAssigned) ? persistedLastAssigned : 0);
+        nextLineNumberRef.current = Math.max(1, lastAssigned + 1);
+        setEntries(ensureLockedLineNumbers(rows, nextLineNumberRef));
         setIsLoaded(true);
       } catch (error) {
         if (!active) return;
@@ -275,9 +322,53 @@ export default function ForingPage() {
     return Boolean(liveValidation.invalidByRow.get(rowIndex)?.[field]);
   }
 
+  function buildMetaPayload(nextStatus) {
+    const effectiveStatus = nextStatus || foringStatus;
+    return {
+      cloNumber: cloNumber.trim(),
+      caseHandler: caseHandler.trim(),
+      hovedlantaker: hovedlantaker.trim(),
+      lantakere: lantakere.map((value) => String(value || "").trim()).filter((value) => value.length > 0),
+      innvilgetLaanMedPant: innvilgetLaanMedPant.trim(),
+      innvilgetUsikretLaan: innvilgetUsikretLaan.trim(),
+      etableringshonorar: etableringshonorar.trim(),
+      lastAssignedLineNumber: Math.max(0, Number(nextLineNumberRef.current || 1) - 1),
+      status: effectiveStatus,
+    };
+  }
+
+  function buildForingPayload(nextStatus) {
+    return {
+      ...buildMetaPayload(nextStatus),
+      entries,
+    };
+  }
+
+  function markCurrentPayloadsAsSaved() {
+    lastSavedMetaSignatureRef.current = JSON.stringify(buildMetaPayload());
+    lastSavedForingSignatureRef.current = JSON.stringify(buildForingPayload());
+  }
+
+  function requestMetaSave() {
+    blurMetaSaveRequestedRef.current = true;
+    setMetaSaveTrigger((value) => value + 1);
+  }
+
+  function requestEntrySave() {
+    blurEntrySaveRequestedRef.current = true;
+    setEntrySaveTrigger((value) => value + 1);
+  }
+
+  useEffect(() => {
+    if (!isLoaded) return;
+    markCurrentPayloadsAsSaved();
+  }, [isLoaded]);
+
   useEffect(() => {
     if (!isLoaded) return;
     if (!caseHandler.trim() || !cloNumber.trim() || !hovedlantaker.trim()) return;
+    const immediate = blurMetaSaveRequestedRef.current;
+    blurMetaSaveRequestedRef.current = false;
 
     const timer = window.setTimeout(async () => {
       try {
@@ -285,7 +376,7 @@ export default function ForingPage() {
       } catch (error) {
         setStatusText(error.message || "Ukjent feil.");
       }
-    }, 700);
+    }, immediate ? 0 : AUTOSAVE_DELAY_MS);
 
     return () => {
       window.clearTimeout(timer);
@@ -300,12 +391,15 @@ export default function ForingPage() {
     innvilgetUsikretLaan,
     etableringshonorar,
     foringStatus,
+    metaSaveTrigger,
   ]);
 
   useEffect(() => {
     if (!isLoaded) return;
     if (!caseHandler.trim() || !cloNumber.trim() || !hovedlantaker.trim()) return;
     if (liveValidation.hasInvalid) return;
+    const immediate = blurEntrySaveRequestedRef.current;
+    blurEntrySaveRequestedRef.current = false;
 
     const timer = window.setTimeout(async () => {
       try {
@@ -313,7 +407,7 @@ export default function ForingPage() {
       } catch (error) {
         setStatusText(error.message || "Ukjent feil.");
       }
-    }, 700);
+    }, immediate ? 0 : AUTOSAVE_DELAY_MS);
 
     return () => {
       window.clearTimeout(timer);
@@ -325,6 +419,7 @@ export default function ForingPage() {
     cloNumber,
     hovedlantaker,
     liveValidation.hasInvalid,
+    entrySaveTrigger,
   ]);
 
   function withTouchedRow(row, patch) {
@@ -360,13 +455,13 @@ export default function ForingPage() {
   }
 
   function updateRow(index, patch) {
-    setEntries((prev) => prev.map((row, rowIndex) => (rowIndex === index ? withTouchedRow(row, patch) : row)));
+    setEntries((prev) => ensureLockedLineNumbers(prev.map((row, rowIndex) => (rowIndex === index ? withTouchedRow(row, patch) : row)), nextLineNumberRef));
   }
 
   function handleHovedlantakerChange(value) {
     const nextValue = value;
     setEntries((prev) =>
-      prev.map((row) => {
+      ensureLockedLineNumbers(prev.map((row) => {
         if (!rowHasUserContent(row)) {
           return row;
         }
@@ -376,7 +471,7 @@ export default function ForingPage() {
           return withTouchedRow(row, { owner: nextValue });
         }
         return row;
-      })
+      }), nextLineNumberRef)
     );
     setHovedlantaker(nextValue);
   }
@@ -395,11 +490,11 @@ export default function ForingPage() {
         // Prevent zero selected: at least one row must be marked as boliglan.
         return prev;
       }
-      return prev.map((row, rowIndex) => {
+      return ensureLockedLineNumbers(prev.map((row, rowIndex) => {
         const shouldBeBoligLaan = rowIndex === index;
         if (row.boligLaan === shouldBeBoligLaan) return row;
         return withTouchedRow(row, { boligLaan: shouldBeBoligLaan });
-      });
+      }), nextLineNumberRef);
     });
   }
 
@@ -414,7 +509,7 @@ export default function ForingPage() {
         next[0] = { ...next[0], boligLaan: true };
       }
 
-      return next;
+      return ensureLockedLineNumbers(next, nextLineNumberRef);
     });
   }
 
@@ -435,7 +530,7 @@ export default function ForingPage() {
 
       const next = [...prev];
       next[index] = withTouchedRow(row, { amount: formatAmount(parsed) });
-      return next;
+      return ensureLockedLineNumbers(next, nextLineNumberRef);
     });
   }
 
@@ -469,7 +564,7 @@ export default function ForingPage() {
   }
 
   function addRows() {
-    setEntries((prev) => [...prev, ...Array.from({ length: STEP_ROWS }, () => createEmptyRow(hovedlantaker))]);
+    setEntries((prev) => ensureLockedLineNumbers([...prev, ...Array.from({ length: STEP_ROWS }, () => createEmptyRow(hovedlantaker))], nextLineNumberRef));
     setStatusText(`La til ${STEP_ROWS} nye linjer.`);
   }
 
@@ -788,7 +883,7 @@ export default function ForingPage() {
         };
       }
 
-      return next;
+      return ensureLockedLineNumbers(next, nextLineNumberRef);
     });
 
     setShowImportModal(false);
@@ -805,18 +900,11 @@ export default function ForingPage() {
   }
 
   async function saveForing(nextStatus) {
-    const effectiveStatus = nextStatus || foringStatus;
-    const payload = {
-      cloNumber: cloNumber.trim(),
-      caseHandler: caseHandler.trim(),
-      hovedlantaker: hovedlantaker.trim(),
-      lantakere: lantakere.map((value) => String(value || "").trim()).filter((value) => value.length > 0),
-      innvilgetLaanMedPant: innvilgetLaanMedPant.trim(),
-      innvilgetUsikretLaan: innvilgetUsikretLaan.trim(),
-      etableringshonorar: etableringshonorar.trim(),
-      entries,
-      status: effectiveStatus,
-    };
+    const payload = buildForingPayload(nextStatus);
+    const signature = JSON.stringify(payload);
+    if (signature === lastSavedForingSignatureRef.current) {
+      return;
+    }
 
     const response = await fetch(`/api/foringer/${foringId}`, {
       method: "PUT",
@@ -828,20 +916,17 @@ export default function ForingPage() {
       const body = await response.json().catch(() => ({ error: "Ukjent feil." }));
       throw new Error(body.error || "Kunne ikke lagre foring.");
     }
+
+    lastSavedForingSignatureRef.current = signature;
+    lastSavedMetaSignatureRef.current = JSON.stringify(buildMetaPayload(nextStatus));
   }
 
   async function saveForingMeta(nextStatus) {
-    const effectiveStatus = nextStatus || foringStatus;
-    const payload = {
-      cloNumber: cloNumber.trim(),
-      caseHandler: caseHandler.trim(),
-      hovedlantaker: hovedlantaker.trim(),
-      lantakere: lantakere.map((value) => String(value || "").trim()).filter((value) => value.length > 0),
-      innvilgetLaanMedPant: innvilgetLaanMedPant.trim(),
-      innvilgetUsikretLaan: innvilgetUsikretLaan.trim(),
-      etableringshonorar: etableringshonorar.trim(),
-      status: effectiveStatus,
-    };
+    const payload = buildMetaPayload(nextStatus);
+    const signature = JSON.stringify(payload);
+    if (signature === lastSavedMetaSignatureRef.current) {
+      return;
+    }
 
     const response = await fetch(`/api/foringer/${foringId}`, {
       method: "PUT",
@@ -853,6 +938,8 @@ export default function ForingPage() {
       const body = await response.json().catch(() => ({ error: "Ukjent feil." }));
       throw new Error(body.error || "Kunne ikke lagre foring.");
     }
+
+    lastSavedMetaSignatureRef.current = signature;
   }
 
   async function handleSave() {
@@ -960,18 +1047,20 @@ export default function ForingPage() {
           <select
             value={row.boligLaan ? "Ja" : "Nei"}
             onChange={(event) => updateBoligLaan(index, event.target.value === "Ja")}
+            onBlur={requestEntrySave}
             disabled={isReadOnlyStatus}
           >
             <option value="Ja">Ja</option>
             <option value="Nei">Nei</option>
           </select>
         </td>
-        <td>{displayNumber}</td>
+          <td>{row.lineNumber || displayNumber}</td>
         <td>
           <input
             list="creditor-options"
             value={row.creditor}
             onChange={(event) => handleCreditorChange(index, event.target.value)}
+            onBlur={requestEntrySave}
             disabled={isReadOnlyStatus}
           />
         </td>
@@ -981,7 +1070,10 @@ export default function ForingPage() {
             value={row.kid}
             inputMode="numeric"
             onChange={(event) => updateRow(index, { kid: event.target.value })}
-            onBlur={() => handleKidBlur(index)}
+            onBlur={() => {
+              handleKidBlur(index);
+              requestEntrySave();
+            }}
             disabled={isReadOnlyStatus}
           />
         </td>
@@ -990,6 +1082,7 @@ export default function ForingPage() {
             placeholder="Notat til kunde"
             value={row.customerNote}
             onChange={(event) => handleCustomerNoteChange(index, event.target.value)}
+            onBlur={requestEntrySave}
             disabled={isReadOnlyStatus}
           />
         </td>
@@ -998,6 +1091,7 @@ export default function ForingPage() {
             maxLength={140}
             value={row.internalNote}
             onChange={(event) => updateRow(index, { internalNote: event.target.value })}
+            onBlur={requestEntrySave}
             disabled={isReadOnlyStatus}
           />
         </td>
@@ -1007,7 +1101,10 @@ export default function ForingPage() {
             value={row.accountNumber}
             inputMode="numeric"
             onChange={(event) => updateRow(index, { accountNumber: event.target.value })}
-            onBlur={() => handleAccountBlur(index)}
+            onBlur={() => {
+              handleAccountBlur(index);
+              requestEntrySave();
+            }}
             disabled={isReadOnlyStatus}
           />
         </td>
@@ -1016,7 +1113,10 @@ export default function ForingPage() {
             value={row.amount}
             inputMode="decimal"
             onChange={(event) => updateRow(index, { amount: event.target.value })}
-            onBlur={() => handleAmountBlur(index)}
+            onBlur={() => {
+              handleAmountBlur(index);
+              requestEntrySave();
+            }}
             disabled={isReadOnlyStatus}
           />
         </td>
@@ -1026,6 +1126,7 @@ export default function ForingPage() {
             min={getTodayIsoDate()}
             value={row.dueDate}
             onChange={(event) => updateRow(index, { dueDate: event.target.value })}
+            onBlur={requestEntrySave}
             disabled={isReadOnlyStatus}
           />
         </td>
@@ -1033,6 +1134,7 @@ export default function ForingPage() {
           <select
             value={row.infridd ? "Ja" : "Nei"}
             onChange={(event) => updateRow(index, { infridd: event.target.value === "Ja" })}
+            onBlur={requestEntrySave}
             disabled={isReadOnlyStatus}
           >
             <option value="Ja">Ja</option>
@@ -1043,6 +1145,7 @@ export default function ForingPage() {
           <select
             value={row.typeKrav}
             onChange={(event) => updateRow(index, { typeKrav: event.target.value })}
+            onBlur={requestEntrySave}
             disabled={isReadOnlyStatus}
           >
             <option value="">Velg</option>
@@ -1056,6 +1159,7 @@ export default function ForingPage() {
           <select
             value={row.owner}
             onChange={(event) => updateRow(index, { owner: event.target.value })}
+            onBlur={requestEntrySave}
             disabled={isReadOnlyStatus}
           >
             {!ownerOptions.includes(row.owner) && row.owner ? (
@@ -1070,6 +1174,7 @@ export default function ForingPage() {
           <select
             value={row.source}
             onChange={(event) => updateRow(index, { source: event.target.value })}
+            onBlur={requestEntrySave}
             disabled={isReadOnlyStatus}
           >
             <option value="">Velg</option>
@@ -1293,7 +1398,10 @@ export default function ForingPage() {
             placeholder="0,00"
             value={innvilgetLaanMedPant}
             onChange={(event) => setInnvilgetLaanMedPant(event.target.value)}
-            onBlur={() => handleMetaAmountBlur("innvilgetLaanMedPant")}
+            onBlur={() => {
+              handleMetaAmountBlur("innvilgetLaanMedPant");
+              requestMetaSave();
+            }}
             disabled={isReadOnlyStatus}
           />
 
@@ -1306,7 +1414,10 @@ export default function ForingPage() {
             placeholder="0,00"
             value={innvilgetUsikretLaan}
             onChange={(event) => setInnvilgetUsikretLaan(event.target.value)}
-            onBlur={() => handleMetaAmountBlur("innvilgetUsikretLaan")}
+            onBlur={() => {
+              handleMetaAmountBlur("innvilgetUsikretLaan");
+              requestMetaSave();
+            }}
             disabled={isReadOnlyStatus}
           />
 
@@ -1319,7 +1430,10 @@ export default function ForingPage() {
             placeholder="0,00"
             value={etableringshonorar}
             onChange={(event) => setEtableringshonorar(event.target.value)}
-            onBlur={() => handleMetaAmountBlur("etableringshonorar")}
+            onBlur={() => {
+              handleMetaAmountBlur("etableringshonorar");
+              requestMetaSave();
+            }}
             disabled={isReadOnlyStatus}
           />
 
@@ -1331,6 +1445,7 @@ export default function ForingPage() {
             required
             value={caseHandler}
             onChange={(event) => setCaseHandler(event.target.value)}
+            onBlur={requestMetaSave}
             disabled={isReadOnlyStatus}
           />
 
@@ -1341,8 +1456,9 @@ export default function ForingPage() {
             type="text"
             required
             value={cloNumber}
-                onChange={(event) => setCloNumber(event.target.value)}
-                disabled={isReadOnlyStatus}
+            onChange={(event) => setCloNumber(event.target.value)}
+            onBlur={requestMetaSave}
+            disabled={isReadOnlyStatus}
               />
 
               <label htmlFor="hovedlantaker">Hovedlåntaker</label>
@@ -1353,6 +1469,7 @@ export default function ForingPage() {
                 required
                 value={hovedlantaker}
                 onChange={(event) => handleHovedlantakerChange(event.target.value)}
+                onBlur={requestMetaSave}
                 disabled={isReadOnlyStatus}
               />
 
@@ -1368,6 +1485,7 @@ export default function ForingPage() {
                       type="text"
                       value={value}
                       onChange={(event) => updateLantaker(index, event.target.value)}
+                      onBlur={requestMetaSave}
                       disabled={isReadOnlyStatus}
                     />
                   ))}
@@ -1380,6 +1498,7 @@ export default function ForingPage() {
             name="foringStatus"
             value={foringStatus}
             onChange={(event) => setForingStatus(event.target.value)}
+            onBlur={requestMetaSave}
           >
             <option value="Pågående">Pågående</option>
             <option value="Avsluttet">Avsluttet</option>
@@ -1427,6 +1546,7 @@ export default function ForingPage() {
                           type="text"
                           value={item.row.kommentar || ""}
                           onChange={(event) => updateRow(item.index, { kommentar: event.target.value })}
+                          onBlur={requestEntrySave}
                           disabled={isReadOnlyStatus}
                         />
                       </div>
