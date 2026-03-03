@@ -35,9 +35,9 @@ Sjekkene inkluderer:
 - `PmtTpInf/SvcLvl/Cd` ma vaere `NURG`.
 - `PmtTpInf/CtgyPurp/Cd` ma vaere `SUPP`.
 - `CdtrAgt` skal ikke sendes uten gyldig innhold.
-- Per transaksjon ma `RmtInf` vaere enten:
-  - `Strd/CdtrRefInf` med `SCOR` + numerisk KID (2-25 sifre), eller
-  - `Ustrd` melding (1-280 tegn).
+- Per transaksjon ma `RmtInf/Strd` vaere satt.
+- `RmtInf/Strd/AddtlRmtInf` ma vaere satt (1-3 forekomster, 1-140 tegn hver).
+- Hvis `CdtrRefInf` er satt, ma den bruke `SCOR` + numerisk KID (2-25 sifre).
 
 Hvis en sjekk feiler, returnerer API-et `400` med konkret feilmelding.
 

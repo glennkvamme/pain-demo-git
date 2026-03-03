@@ -18,6 +18,12 @@ function nowIsoTimestamp() {
   return new Date().toISOString();
 }
 
+function formatMetaAmountValue(rawValue) {
+  const parsed = parseAmountInput(rawValue);
+  if (!parsed) return String(rawValue || "");
+  return formatAmount(parsed);
+}
+
 function formatRowTimestamp(value) {
   const iso = String(value || "").trim();
   if (!iso) return "";
@@ -152,9 +158,9 @@ export default function ForingPage() {
             ? foringPayload.lantakere.map((value) => String(value || "")).filter((value) => value.trim())
             : []
         );
-        setInnvilgetLaanMedPant(String(foringPayload.innvilgetLaanMedPant || ""));
-        setInnvilgetUsikretLaan(String(foringPayload.innvilgetUsikretLaan || ""));
-        setEtableringshonorar(String(foringPayload.etableringshonorar || ""));
+        setInnvilgetLaanMedPant(formatMetaAmountValue(foringPayload.innvilgetLaanMedPant));
+        setInnvilgetUsikretLaan(formatMetaAmountValue(foringPayload.innvilgetUsikretLaan));
+        setEtableringshonorar(formatMetaAmountValue(foringPayload.etableringshonorar));
         setForingStatus(String(foringPayload.status || "Pågående"));
 
         const incomingEntries = Array.isArray(foringPayload.entries)
@@ -583,6 +589,20 @@ export default function ForingPage() {
     }
 
     return rows;
+  }
+
+  function handleMetaAmountBlur(field) {
+    if (field === "innvilgetLaanMedPant") {
+      setInnvilgetLaanMedPant((prev) => formatMetaAmountValue(prev));
+      return;
+    }
+
+    if (field === "innvilgetUsikretLaan") {
+      setInnvilgetUsikretLaan((prev) => formatMetaAmountValue(prev));
+      return;
+    }
+
+    setEtableringshonorar((prev) => formatMetaAmountValue(prev));
   }
 
   function parseNedbetalingslanRows(rawText) {
@@ -1273,6 +1293,7 @@ export default function ForingPage() {
             placeholder="0,00"
             value={innvilgetLaanMedPant}
             onChange={(event) => setInnvilgetLaanMedPant(event.target.value)}
+            onBlur={() => handleMetaAmountBlur("innvilgetLaanMedPant")}
             disabled={isReadOnlyStatus}
           />
 
@@ -1285,6 +1306,7 @@ export default function ForingPage() {
             placeholder="0,00"
             value={innvilgetUsikretLaan}
             onChange={(event) => setInnvilgetUsikretLaan(event.target.value)}
+            onBlur={() => handleMetaAmountBlur("innvilgetUsikretLaan")}
             disabled={isReadOnlyStatus}
           />
 
@@ -1297,6 +1319,7 @@ export default function ForingPage() {
             placeholder="0,00"
             value={etableringshonorar}
             onChange={(event) => setEtableringshonorar(event.target.value)}
+            onBlur={() => handleMetaAmountBlur("etableringshonorar")}
             disabled={isReadOnlyStatus}
           />
 

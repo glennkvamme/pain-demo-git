@@ -350,7 +350,7 @@ app.MapPost("/api/pain001", async (HttpRequest request) =>
         validated.Add(result.Value!);
     }
 
-    var xml = PainXml.Build(validated);
+    var xml = PainXml.Build(validated, cloNumber);
     var preflightResult = PainPreflight.Validate(xml);
     if (preflightResult.Error is not null)
     {
@@ -851,7 +851,7 @@ static class PainXml
     private const string PayerOrgNo = "918315446";
     private const string PayerBban = "32072278835";
 
-    public static string Build(List<ValidatedEntry> transactions)
+    public static string Build(List<ValidatedEntry> transactions, string cloNumber)
     {
         var nowUtc = DateTime.UtcNow;
         var stamp = nowUtc.ToString("yyyyMMddHHmmss");
@@ -874,7 +874,7 @@ static class PainXml
                 })
                 .ToList();
 
-            paymentInfos.Add(BuildPaymentInfo(stamp, i + 1, grouped[i].Key, txs));
+            paymentInfos.Add(BuildPaymentInfo(stamp, i + 1, grouped[i].Key, txs, cloNumber));
         }
 
         var totalAmount = transactions.Sum(tx => decimal.Parse(tx.Amount, CultureInfo.InvariantCulture))
@@ -914,9 +914,9 @@ static class PainXml
         return $"pain001_KraftBankASA_{date:yyyyMMdd_HHmmss}.xml";
     }
 
-    private static string BuildPaymentInfo(string stamp, int index, string dueDate, List<ValidatedEntry> transactions)
+    private static string BuildPaymentInfo(string stamp, int index, string dueDate, List<ValidatedEntry> transactions, string cloNumber)
     {
-        var transactionsXml = string.Join('\n', transactions.Select(BuildTransaction));
+        var transactionsXml = string.Join('\n', transactions.Select(tx => BuildTransaction(tx, cloNumber)));
 
         return $"""
 <PmtInf>
@@ -969,9 +969,9 @@ static class PainXml
 """;
     }
 
-    private static string BuildTransaction(ValidatedEntry tx)
+    private static string BuildTransaction(ValidatedEntry tx, string cloNumber)
     {
-        var remittanceXml = BuildRemittanceXml(tx);
+        var remittanceXml = BuildRemittanceXml(tx, cloNumber);
 
         return $"""
 <CdtTrfTxInf>
@@ -1003,9 +1003,14 @@ static class PainXml
 """;
     }
 
-    private static string BuildRemittanceXml(ValidatedEntry tx)
+    private static string BuildRemittanceXml(ValidatedEntry tx, string cloNumber)
     {
-        // Each line is either KID (structured) or customer note (unstructured), never both.
+        var addtlRmtInfValues = BuildAddtlRmtInfValues(tx.CustomerNote, cloNumber)
+            .Select(value => $"            <AddtlRmtInf>{Escape(value)}</AddtlRmtInf>")
+            .ToList();
+        var addtlRmtInfXml = string.Join('\n', addtlRmtInfValues);
+
+        // Use structured remittance to carry CLO number via AddtlRmtInf on every transaction.
         if (tx.Kid.Length > 0)
         {
             return $"""
@@ -1019,6 +1024,7 @@ static class PainXml
               </Tp>
               <Ref>{Escape(tx.Kid)}</Ref>
             </CdtrRefInf>
+{addtlRmtInfXml}
           </Strd>
         </RmtInf>
 """;
@@ -1028,12 +1034,42 @@ static class PainXml
         {
             return $"""
 <RmtInf>
-          <Ustrd>{Escape(tx.CustomerNote)}</Ustrd>
+          <Strd>
+{addtlRmtInfXml}
+          </Strd>
         </RmtInf>
 """;
         }
 
         return string.Empty;
+    }
+
+    private static List<string> BuildAddtlRmtInfValues(string customerNote, string cloNumber)
+    {
+        var values = new List<string>();
+        var cleanCustomerNote = (customerNote ?? string.Empty).Trim();
+        if (cleanCustomerNote.Length > 0)
+        {
+            values.AddRange(SplitIntoChunks(cleanCustomerNote, 140));
+        }
+
+        values.Add($"CLO {cloNumber.Trim()}");
+
+        if (values.Count > 3)
+        {
+            return values.Take(3).ToList();
+        }
+
+        return values;
+    }
+
+    private static IEnumerable<string> SplitIntoChunks(string value, int maxLength)
+    {
+        for (var i = 0; i < value.Length; i += maxLength)
+        {
+            var length = Math.Min(maxLength, value.Length - i);
+            yield return value.Substring(i, length);
+        }
     }
 
     private static string Escape(string value)
@@ -1150,14 +1186,33 @@ static class PainPreflight
             }
 
             var hasStrd = tx.SelectSingleNode("p:RmtInf/p:Strd", ns) is not null;
-            var hasUstrd = tx.SelectSingleNode("p:RmtInf/p:Ustrd", ns) is not null;
-
-            if (hasStrd == hasUstrd)
+            if (!hasStrd)
             {
-                return ValidationResult<bool>.Fail($"Linje {line}: RmtInf ma vaere enten Strd (KID) eller Ustrd (melding).");
+                return ValidationResult<bool>.Fail($"Linje {line}: RmtInf/Strd ma vaere satt.");
             }
 
-            if (hasStrd)
+            var addtlRemittanceNodes = tx.SelectNodes("p:RmtInf/p:Strd/p:AddtlRmtInf", ns);
+            if (addtlRemittanceNodes is null || addtlRemittanceNodes.Count == 0)
+            {
+                return ValidationResult<bool>.Fail($"Linje {line}: RmtInf/Strd/AddtlRmtInf ma vaere satt.");
+            }
+
+            if (addtlRemittanceNodes.Count > 3)
+            {
+                return ValidationResult<bool>.Fail($"Linje {line}: Maks 3 AddtlRmtInf er tillatt.");
+            }
+
+            foreach (XmlNode addtlNode in addtlRemittanceNodes)
+            {
+                var addtlValue = (addtlNode.InnerText ?? string.Empty).Trim();
+                if (addtlValue.Length is < 1 or > 140)
+                {
+                    return ValidationResult<bool>.Fail($"Linje {line}: AddtlRmtInf ma vaere 1-140 tegn.");
+                }
+            }
+
+            var kidRefNode = tx.SelectSingleNode("p:RmtInf/p:Strd/p:CdtrRefInf/p:Ref", ns);
+            if (kidRefNode is not null)
             {
                 var refCode = tx.SelectSingleNode("p:RmtInf/p:Strd/p:CdtrRefInf/p:Tp/p:CdOrPrtry/p:Cd", ns)?.InnerText;
                 if (!string.Equals(refCode, "SCOR", StringComparison.Ordinal))
@@ -1165,18 +1220,10 @@ static class PainPreflight
                     return ValidationResult<bool>.Fail($"Linje {line}: Strukturert KID ma bruke CdtrRefInf/Tp/CdOrPrtry/Cd = SCOR.");
                 }
 
-                var kidRef = tx.SelectSingleNode("p:RmtInf/p:Strd/p:CdtrRefInf/p:Ref", ns)?.InnerText ?? string.Empty;
+                var kidRef = kidRefNode.InnerText ?? string.Empty;
                 if (kidRef.Length < 2 || kidRef.Length > 25 || !kidRef.All(char.IsDigit))
                 {
                     return ValidationResult<bool>.Fail($"Linje {line}: KID-referanse ma vaere 2-25 sifre.");
-                }
-            }
-            else
-            {
-                var note = tx.SelectSingleNode("p:RmtInf/p:Ustrd", ns)?.InnerText ?? string.Empty;
-                if (string.IsNullOrWhiteSpace(note) || note.Length > 280)
-                {
-                    return ValidationResult<bool>.Fail($"Linje {line}: Ustrukturert melding ma vaere 1-280 tegn.");
                 }
             }
         }
