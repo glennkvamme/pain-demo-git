@@ -729,14 +729,78 @@ static class Amount
 {
     public static string? TryFormat(string? rawAmount)
     {
-        var normalized = (rawAmount ?? string.Empty).Replace(',', '.').Trim();
-        if (!decimal.TryParse(normalized, NumberStyles.Number, CultureInfo.InvariantCulture, out var parsed))
+        var raw = rawAmount ?? string.Empty;
+        var compact = new string(raw.Where(c => !char.IsWhiteSpace(c)).ToArray()).Trim();
+        if (compact.Length == 0)
+        {
+            return null;
+        }
+
+        var normalized = NormalizeNumber(compact);
+        if (!decimal.TryParse(
+                normalized,
+                NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint,
+                CultureInfo.InvariantCulture,
+                out var parsed))
         {
             return null;
         }
 
         if (parsed <= 0) return null;
         return parsed.ToString("0.00", CultureInfo.InvariantCulture);
+    }
+
+    private static string NormalizeNumber(string value)
+    {
+        var commaCount = value.Count(c => c == ',');
+        var dotCount = value.Count(c => c == '.');
+
+        // Mixed separators (e.g. 1.234,56 or 1,234.56): last separator is treated as decimal.
+        if (commaCount > 0 && dotCount > 0)
+        {
+            var lastComma = value.LastIndexOf(',');
+            var lastDot = value.LastIndexOf('.');
+            var decimalSeparator = lastComma > lastDot ? ',' : '.';
+            var thousandSeparator = decimalSeparator == ',' ? '.' : ',';
+
+            var withoutThousands = value.Replace(thousandSeparator.ToString(), string.Empty);
+            return decimalSeparator == ','
+                ? withoutThousands.Replace(',', '.')
+                : withoutThousands;
+        }
+
+        if (commaCount > 0)
+        {
+            return NormalizeSingleSeparator(value, ',');
+        }
+
+        if (dotCount > 0)
+        {
+            return NormalizeSingleSeparator(value, '.');
+        }
+
+        return value;
+    }
+
+    private static string NormalizeSingleSeparator(string value, char separator)
+    {
+        var count = value.Count(c => c == separator);
+        if (count > 1)
+        {
+            return value.Replace(separator.ToString(), string.Empty);
+        }
+
+        var separatorIndex = value.LastIndexOf(separator);
+        var digitsAfter = value.Length - separatorIndex - 1;
+
+        // If exactly one separator and at most 2 trailing digits, treat it as decimal separator.
+        if (digitsAfter is >= 1 and <= 2)
+        {
+            return separator == ',' ? value.Replace(',', '.') : value;
+        }
+
+        // Otherwise treat it as thousand separator.
+        return value.Replace(separator.ToString(), string.Empty);
     }
 }
 
@@ -908,15 +972,6 @@ static class PainXml
     private static string BuildTransaction(ValidatedEntry tx)
     {
         var remittanceXml = BuildRemittanceXml(tx);
-        var supplementaryDataXml = tx.InternalNote.Length > 0
-            ? $"""
-<SplmtryData>
-          <Envlp>
-            <InterntNotat>{Escape(tx.InternalNote)}</InterntNotat>
-          </Envlp>
-        </SplmtryData>
-"""
-            : string.Empty;
 
         return $"""
 <CdtTrfTxInf>
@@ -944,7 +999,6 @@ static class PainXml
           </Id>
         </CdtrAcct>
         {remittanceXml}
-        {supplementaryDataXml}
       </CdtTrfTxInf>
 """;
     }

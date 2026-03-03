@@ -41,7 +41,7 @@ function Layout({ children }) {
         <SideMenu />
         <section className="content-area">
           {children}
-          <footer className="page-version">Versjon v.2.0.9</footer>
+          <footer className="page-version">Versjon v.2.1.0</footer>
         </section>
       </div>
     </main>
