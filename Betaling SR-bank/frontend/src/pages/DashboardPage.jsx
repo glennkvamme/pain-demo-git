@@ -1,5 +1,7 @@
-﻿import { useEffect, useMemo, useState } from "react";
+﻿import { useAuth0 } from "@auth0/auth0-react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { createApiClient } from "../apiClient";
 
 function formatDate(value) {
   const date = new Date(value);
@@ -8,6 +10,8 @@ function formatDate(value) {
 }
 
 export default function DashboardPage() {
+  const { getAccessTokenSilently } = useAuth0();
+  const { authFetch } = useMemo(() => createApiClient(getAccessTokenSilently), [getAccessTokenSilently]);
   const [foringer, setForinger] = useState([]);
   const [cloNumber, setCloNumber] = useState("");
   const [caseHandler, setCaseHandler] = useState("");
@@ -18,7 +22,7 @@ export default function DashboardPage() {
 
   async function loadForinger() {
     try {
-      const response = await fetch("/api/foringer");
+      const response = await authFetch("/api/foringer");
       if (!response.ok) throw new Error("Kunne ikke hente foringsliste.");
       const payload = await response.json();
       setForinger(Array.isArray(payload) ? payload : []);
@@ -39,7 +43,7 @@ export default function DashboardPage() {
 
     setStatusText("Oppretter foring...");
     try {
-      const response = await fetch("/api/foringer", {
+      const response = await authFetch("/api/foringer", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -202,3 +206,4 @@ export default function DashboardPage() {
     </>
   );
 }
+

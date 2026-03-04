@@ -1,4 +1,7 @@
-﻿import { useEffect, useState } from "react";
+﻿import { useAuth0 } from "@auth0/auth0-react";
+import { useEffect, useMemo, useState } from "react";
+import { createApiClient } from "../apiClient";
+import { extractFilenameFromDisposition } from "../utils";
 
 function formatDate(value) {
   const date = new Date(value);
@@ -7,6 +10,8 @@ function formatDate(value) {
 }
 
 export default function HistoryPage() {
+  const { getAccessTokenSilently } = useAuth0();
+  const { authFetch } = useMemo(() => createApiClient(getAccessTokenSilently), [getAccessTokenSilently]);
   const [historyItems, setHistoryItems] = useState([]);
   const [statusText, setStatusText] = useState("");
 
@@ -17,7 +22,7 @@ export default function HistoryPage() {
       setStatusText("Henter historikk...");
 
       try {
-        const response = await fetch("/api/history");
+        const response = await authFetch("/api/history");
         if (!response.ok) throw new Error("Kunne ikke hente historikk.");
         const items = await response.json();
 
@@ -35,6 +40,35 @@ export default function HistoryPage() {
       active = false;
     };
   }, []);
+
+  async function downloadHistoryFile(item) {
+    setStatusText("Laster ned backup...");
+
+    try {
+      const response = await authFetch(`/api/history/${item.id}/download`);
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({ error: "Kunne ikke laste ned fil." }));
+        throw new Error(body.error || "Kunne ikke laste ned fil.");
+      }
+
+      const blob = await response.blob();
+      const disposition = response.headers.get("content-disposition");
+      const filename = extractFilenameFromDisposition(disposition) || item.generatedFileName || "backup.xml";
+
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+
+      setStatusText(`Lastet ned ${filename}.`);
+    } catch (error) {
+      setStatusText(error.message || "Ukjent feil.");
+    }
+  }
 
   return (
     <>
@@ -69,9 +103,9 @@ export default function HistoryPage() {
                   <td>{item.transactionsCount || 0}</td>
                   <td>{item.generatedFileName || ""}</td>
                   <td>
-                    <a className="download-link" href={`/api/history/${item.id}/download`}>
+                    <button type="button" className="secondary-btn" onClick={() => downloadHistoryFile(item)}>
                       Last ned
-                    </a>
+                    </button>
                   </td>
                 </tr>
               ))
@@ -84,3 +118,4 @@ export default function HistoryPage() {
     </>
   );
 }
+

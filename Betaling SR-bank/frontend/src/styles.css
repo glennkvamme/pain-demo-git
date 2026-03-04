@@ -716,3 +716,28 @@ button:disabled {
     max-height: none;
   }
 }
+
+.auth-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.auth-user {
+  color: #324a63;
+  font-weight: 600;
+}
+
+.auth-view {
+  max-width: 680px;
+}
+
+.role-chip {
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid #cbd6e2;
+  background: #f8fbff;
+  color: #324a63;
+  font-size: 0.85rem;
+  font-weight: 700;
+}

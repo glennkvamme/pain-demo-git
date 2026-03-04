@@ -1,3 +1,4 @@
+﻿import { useAuth0 } from "@auth0/auth0-react";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
@@ -10,6 +11,7 @@ import {
   parseCustomerNoteFields,
   parseAmountInput,
 } from "../utils";
+import { createApiClient } from "../apiClient";
 
 const INITIAL_ROWS = 5;
 const STEP_ROWS = 5;
@@ -135,6 +137,8 @@ function ensureLockedLineNumbers(rows, nextLineNumberRef) {
 }
 
 export default function ForingPage() {
+  const { getAccessTokenSilently } = useAuth0();
+  const { authFetch } = useMemo(() => createApiClient(getAccessTokenSilently), [getAccessTokenSilently]);
   const { foringId } = useParams();
   const [entries, setEntries] = useState(() =>
     Array.from({ length: INITIAL_ROWS }, (_, index) => ({ ...createEmptyRow(""), boligLaan: index === 0 }))
@@ -173,8 +177,8 @@ export default function ForingPage() {
 
       try {
         const [creditorsResponse, foringResponse] = await Promise.all([
-          fetch("/api/creditors"),
-          fetch(`/api/foringer/${foringId}`),
+          authFetch("/api/creditors"),
+          authFetch(`/api/foringer/${foringId}`),
         ]);
 
         if (!creditorsResponse.ok) throw new Error("Kunne ikke hente kreditorliste.");
@@ -906,7 +910,7 @@ export default function ForingPage() {
       return;
     }
 
-    const response = await fetch(`/api/foringer/${foringId}`, {
+    const response = await authFetch(`/api/foringer/${foringId}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -928,7 +932,7 @@ export default function ForingPage() {
       return;
     }
 
-    const response = await fetch(`/api/foringer/${foringId}`, {
+    const response = await authFetch(`/api/foringer/${foringId}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -987,7 +991,7 @@ export default function ForingPage() {
     try {
       await saveForing();
 
-      const response = await fetch("/api/pain001", {
+      const response = await authFetch("/api/pain001", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1569,6 +1573,9 @@ export default function ForingPage() {
     </>
   );
 }
+
+
+
 
 
 

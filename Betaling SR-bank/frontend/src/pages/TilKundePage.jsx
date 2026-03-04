@@ -1,5 +1,7 @@
+﻿import { useAuth0 } from "@auth0/auth0-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import { createApiClient } from "../apiClient";
 import { formatAmount, isValidKid, parseAmountInput, parseCustomerNoteFields } from "../utils";
 
 const FIRST_PAYMENT_ACCOUNT = "3207 22 78835";
@@ -30,6 +32,8 @@ function escapeHtml(value) {
 }
 
 export default function TilKundePage() {
+  const { getAccessTokenSilently } = useAuth0();
+  const { authFetch } = useMemo(() => createApiClient(getAccessTokenSilently), [getAccessTokenSilently]);
   const { foringId } = useParams();
   const [statusText, setStatusText] = useState("");
   const [isLoaded, setIsLoaded] = useState(false);
@@ -49,7 +53,7 @@ export default function TilKundePage() {
 
     async function loadForing() {
       try {
-        const response = await fetch(`/api/foringer/${foringId}`);
+        const response = await authFetch(`/api/foringer/${foringId}`);
         if (!response.ok) {
           const body = await response.json().catch(() => ({ error: "Kunne ikke hente foring." }));
           throw new Error(body.error || "Kunne ikke hente foring.");
@@ -109,7 +113,7 @@ export default function TilKundePage() {
           return;
         }
 
-        const response = await fetch(`/api/foringer/${foringId}`, {
+        const response = await authFetch(`/api/foringer/${foringId}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -405,3 +409,6 @@ export default function TilKundePage() {
     </>
   );
 }
+
+
+

@@ -1,8 +1,10 @@
 using System.Globalization;
 using System.Security;
+using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
 using System.Xml;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 
 var options = new WebApplicationOptions
 {
@@ -10,6 +12,36 @@ var options = new WebApplicationOptions
     WebRootPath = "public"
 };
 var builder = WebApplication.CreateBuilder(options);
+var auth0Domain = (Environment.GetEnvironmentVariable("AUTH0_DOMAIN") ?? "dev-1lf3xlysx0dhdd31.us.auth0.com").Trim();
+var auth0Audience = (Environment.GetEnvironmentVariable("AUTH0_AUDIENCE") ?? "https://betaling-api").Trim();
+var auth0RolesClaim = (Environment.GetEnvironmentVariable("AUTH0_ROLES_CLAIM") ?? "https://betaling-app/roles").Trim();
+
+if (!auth0Domain.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
+    !auth0Domain.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+{
+    auth0Domain = $"https://{auth0Domain}";
+}
+
+auth0Domain = auth0Domain.TrimEnd('/');
+
+builder.Services
+    .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.Authority = auth0Domain;
+        options.Audience = auth0Audience;
+    });
+
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy("AdvisorOrAdmin", policy =>
+        policy.RequireAuthenticatedUser().RequireAssertion(context =>
+            HasAnyRole(context.User, auth0RolesClaim, "advisor", "admin")));
+
+    options.AddPolicy("AdminOnly", policy =>
+        policy.RequireAuthenticatedUser().RequireAssertion(context =>
+            HasAnyRole(context.User, auth0RolesClaim, "admin")));
+});
 
 var app = builder.Build();
 var storageRootPath = (Environment.GetEnvironmentVariable("APP_STORAGE_ROOT") ?? string.Empty).Trim();
@@ -34,6 +66,8 @@ catch (Exception ex)
 
 app.UseDefaultFiles();
 app.UseStaticFiles();
+app.UseAuthentication();
+app.UseAuthorization();
 
 app.MapGet("/api/creditors", () =>
 {
@@ -46,7 +80,7 @@ app.MapGet("/api/creditors", () =>
     {
         return Results.Json(new { error = "Kunne ikke lese kreditorliste." }, statusCode: 500);
     }
-});
+}).RequireAuthorization("AdvisorOrAdmin");
 
 app.MapGet("/api/foringer", () =>
 {
@@ -61,7 +95,7 @@ app.MapGet("/api/foringer", () =>
     {
         return Results.Json(new { error = "Kunne ikke lese foringsliste." }, statusCode: 500);
     }
-});
+}).RequireAuthorization("AdvisorOrAdmin");
 
 app.MapGet("/api/foringer/{id}", (string id) =>
 {
@@ -79,7 +113,7 @@ app.MapGet("/api/foringer/{id}", (string id) =>
     {
         return Results.Json(new { error = "Kunne ikke lese foringen." }, statusCode: 500);
     }
-});
+}).RequireAuthorization("AdvisorOrAdmin");
 
 app.MapPost("/api/foringer", async (HttpRequest request) =>
 {
@@ -139,7 +173,7 @@ app.MapPost("/api/foringer", async (HttpRequest request) =>
     {
         return Results.Json(new { error = "Kunne ikke opprette foring." }, statusCode: 500);
     }
-});
+}).RequireAuthorization("AdvisorOrAdmin");
 
 app.MapPut("/api/foringer/{id}", async (string id, HttpRequest request) =>
 {
@@ -288,7 +322,7 @@ app.MapPut("/api/foringer/{id}", async (string id, HttpRequest request) =>
     {
         return Results.Json(new { error = "Kunne ikke oppdatere foring." }, statusCode: 500);
     }
-});
+}).RequireAuthorization("AdvisorOrAdmin");
 
 app.MapPut("/api/creditors", async (HttpRequest request) =>
 {
@@ -308,7 +342,7 @@ app.MapPut("/api/creditors", async (HttpRequest request) =>
     {
         return Results.Json(new { error = "Kunne ikke lagre kreditorliste." }, statusCode: 500);
     }
-});
+}).RequireAuthorization("AdminOnly");
 
 app.MapGet("/api/history", () =>
 {
@@ -321,7 +355,7 @@ app.MapGet("/api/history", () =>
     {
         return Results.Json(new { error = "Kunne ikke lese historikk." }, statusCode: 500);
     }
-});
+}).RequireAuthorization("AdminOnly");
 
 app.MapGet("/api/history/{id}/download", (string id) =>
 {
@@ -346,7 +380,7 @@ app.MapGet("/api/history/{id}/download", (string id) =>
     {
         return Results.Json(new { error = "Kunne ikke hente backup-fil." }, statusCode: 500);
     }
-});
+}).RequireAuthorization("AdminOnly");
 
 app.MapPost("/api/pain001", async (HttpRequest request) =>
 {
@@ -434,7 +468,7 @@ app.MapPost("/api/pain001", async (HttpRequest request) =>
     }
 
     return Results.File(Encoding.UTF8.GetBytes(xml), "application/xml; charset=utf-8", generatedFileName);
-});
+}).RequireAuthorization("AdvisorOrAdmin");
 
 app.MapFallback(async context =>
 {
@@ -457,6 +491,59 @@ if (!int.TryParse(portValue, out var port))
 app.Urls.Clear();
 app.Urls.Add($"http://0.0.0.0:{port}");
 app.Run();
+
+static bool HasAnyRole(ClaimsPrincipal user, string rolesClaimName, params string[] allowedRoles)
+{
+    var normalizedAllowed = new HashSet<string>(allowedRoles.Select(NormalizeRole), StringComparer.Ordinal);
+    var roleClaims = user.FindAll(rolesClaimName).Select(claim => claim.Value).ToList();
+
+    if (roleClaims.Count == 0)
+    {
+        return false;
+    }
+
+    foreach (var claimValue in roleClaims)
+    {
+        // Auth0 can emit either multiple claims or a JSON array claim value.
+        if (claimValue.StartsWith("[", StringComparison.Ordinal))
+        {
+            try
+            {
+                var parsed = JsonSerializer.Deserialize<List<string>>(claimValue) ?? new List<string>();
+                if (parsed.Any(role => normalizedAllowed.Contains(NormalizeRole(role))))
+                {
+                    return true;
+                }
+            }
+            catch
+            {
+                // Ignore malformed claim and continue with remaining claims.
+            }
+        }
+        else if (normalizedAllowed.Contains(NormalizeRole(claimValue)))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static string NormalizeRole(string? role)
+{
+    if (string.IsNullOrWhiteSpace(role))
+    {
+        return string.Empty;
+    }
+
+    return role.Trim().ToLowerInvariant() switch
+    {
+        "administrator" => "admin",
+        "radgiver" => "advisor",
+        "rådgiver" => "advisor",
+        _ => role.Trim().ToLowerInvariant()
+    };
+}
 
 sealed class DataStore(string rootPath, string seedRootPath)
 {
@@ -1039,7 +1126,7 @@ static class PainXml
 
     private static string BuildTransaction(ValidatedEntry tx, string cloNumber)
     {
-        var remittanceXml = BuildRemittanceXml(tx, cloNumber);
+        var remittanceXml = BuildRemittanceXml(tx);
 
         return $"""
 <CdtTrfTxInf>
@@ -1071,14 +1158,13 @@ static class PainXml
 """;
     }
 
-    private static string BuildRemittanceXml(ValidatedEntry tx, string cloNumber)
+    private static string BuildRemittanceXml(ValidatedEntry tx)
     {
-        var addtlRmtInfValues = BuildAddtlRmtInfValues(tx.CustomerNote, cloNumber)
+        var addtlRmtInfValues = BuildAddtlRmtInfValues(tx.CustomerNote)
             .Select(value => $"            <AddtlRmtInf>{Escape(value)}</AddtlRmtInf>")
             .ToList();
         var addtlRmtInfXml = string.Join('\n', addtlRmtInfValues);
 
-        // Use structured remittance to carry CLO number via AddtlRmtInf on every transaction.
         if (tx.Kid.Length > 0)
         {
             return $"""
@@ -1112,7 +1198,7 @@ static class PainXml
         return string.Empty;
     }
 
-    private static List<string> BuildAddtlRmtInfValues(string customerNote, string cloNumber)
+    private static List<string> BuildAddtlRmtInfValues(string customerNote)
     {
         var values = new List<string>();
         var cleanCustomerNote = (customerNote ?? string.Empty).Trim();
@@ -1120,8 +1206,6 @@ static class PainXml
         {
             values.AddRange(SplitIntoChunks(cleanCustomerNote, 140));
         }
-
-        values.Add($"CLO {cloNumber.Trim()}");
 
         if (values.Count > 3)
         {
@@ -1253,6 +1337,12 @@ static class PainPreflight
                 return ValidationResult<bool>.Fail($"Linje {line}: CdtrAgt skal ikke sendes uten gyldig innhold.");
             }
 
+            var remittanceNode = tx.SelectSingleNode("p:RmtInf", ns);
+            if (remittanceNode is null)
+            {
+                continue;
+            }
+
             var hasStrd = tx.SelectSingleNode("p:RmtInf/p:Strd", ns) is not null;
             if (!hasStrd)
             {
@@ -1260,22 +1350,20 @@ static class PainPreflight
             }
 
             var addtlRemittanceNodes = tx.SelectNodes("p:RmtInf/p:Strd/p:AddtlRmtInf", ns);
-            if (addtlRemittanceNodes is null || addtlRemittanceNodes.Count == 0)
-            {
-                return ValidationResult<bool>.Fail($"Linje {line}: RmtInf/Strd/AddtlRmtInf ma vaere satt.");
-            }
-
-            if (addtlRemittanceNodes.Count > 3)
+            if (addtlRemittanceNodes is not null && addtlRemittanceNodes.Count > 3)
             {
                 return ValidationResult<bool>.Fail($"Linje {line}: Maks 3 AddtlRmtInf er tillatt.");
             }
 
-            foreach (XmlNode addtlNode in addtlRemittanceNodes)
+            if (addtlRemittanceNodes is not null)
             {
-                var addtlValue = (addtlNode.InnerText ?? string.Empty).Trim();
-                if (addtlValue.Length is < 1 or > 140)
+                foreach (XmlNode addtlNode in addtlRemittanceNodes)
                 {
-                    return ValidationResult<bool>.Fail($"Linje {line}: AddtlRmtInf ma vaere 1-140 tegn.");
+                    var addtlValue = (addtlNode.InnerText ?? string.Empty).Trim();
+                    if (addtlValue.Length is < 1 or > 140)
+                    {
+                        return ValidationResult<bool>.Fail($"Linje {line}: AddtlRmtInf ma vaere 1-140 tegn.");
+                    }
                 }
             }
 

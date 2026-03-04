@@ -1,4 +1,6 @@
-﻿import { useEffect, useState } from "react";
+﻿import { useAuth0 } from "@auth0/auth0-react";
+import { useEffect, useMemo, useState } from "react";
+import { createApiClient } from "../apiClient";
 import { isValidMod11 } from "../utils";
 
 function createCreditor() {
@@ -6,6 +8,8 @@ function createCreditor() {
 }
 
 export default function CreditorsPage() {
+  const { getAccessTokenSilently } = useAuth0();
+  const { authFetch } = useMemo(() => createApiClient(getAccessTokenSilently), [getAccessTokenSilently]);
   const [rows, setRows] = useState([]);
   const [statusText, setStatusText] = useState("");
 
@@ -13,7 +17,7 @@ export default function CreditorsPage() {
     setStatusText("Henter kreditorliste...");
 
     try {
-      const response = await fetch("/api/creditors");
+      const response = await authFetch("/api/creditors");
       if (!response.ok) throw new Error("Kunne ikke hente kreditorliste.");
       const creditors = await response.json();
       setRows(Array.isArray(creditors) && creditors.length > 0 ? creditors : [createCreditor()]);
@@ -68,7 +72,7 @@ export default function CreditorsPage() {
     setStatusText("Lagrer kreditorliste...");
 
     try {
-      const response = await fetch("/api/creditors", {
+      const response = await authFetch("/api/creditors", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ creditors }),
@@ -136,3 +140,4 @@ export default function CreditorsPage() {
     </>
   );
 }
+
