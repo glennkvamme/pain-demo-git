@@ -10,7 +10,7 @@ function formatDate(value) {
 }
 
 export default function DashboardPage() {
-  const { getAccessTokenSilently } = useAuth0();
+  const { getAccessTokenSilently, user } = useAuth0();
   const { authFetch } = useMemo(() => createApiClient(getAccessTokenSilently), [getAccessTokenSilently]);
   const [foringer, setForinger] = useState([]);
   const [cloNumber, setCloNumber] = useState("");
@@ -49,6 +49,7 @@ export default function DashboardPage() {
         body: JSON.stringify({
           cloNumber: cloNumber.trim(),
           caseHandler: caseHandler.trim(),
+          createdByEmail: String(user?.email || "").trim(),
         }),
       });
 
@@ -88,7 +89,7 @@ export default function DashboardPage() {
   return (
     <>
       <h1>Oversikt</h1>
-      <p>Liste over alle foringer. CLO nummer er master for oppfolging av pagaende og ferdige foringer.</p>
+      <p>Liste over alle foringer.</p>
 
       <div className="actions actions-left">
         <button type="button" onClick={openCreateModal}>Opprett ny kreditorliste</button>
@@ -169,12 +170,12 @@ export default function DashboardPage() {
         <table>
           <thead>
             <tr>
-              <th>#</th>
+              <th>Handling</th>
               <th>CLO nummer</th>
               <th>Saksbehandler</th>
               <th>Opprettet</th>
               <th>Status</th>
-              <th>Handling</th>
+              <th>Opprettet av</th>
             </tr>
           </thead>
           <tbody>
@@ -185,16 +186,16 @@ export default function DashboardPage() {
             ) : (
               filteredForinger.map((item, index) => (
                 <tr key={item.id || `foring-${index}`}>
-                  <td>{index + 1}</td>
-                  <td>{item.cloNumber || ""}</td>
-                  <td>{item.caseHandler || ""}</td>
-                  <td>{formatDate(item.createdAt)}</td>
-                  <td>{item.status || "Pågående"}</td>
                   <td>
                     <Link className="table-action-btn" to={`/foring/${item.id}`}>
                       Åpne kreditorliste
                     </Link>
                   </td>
+                  <td>{item.cloNumber || ""}</td>
+                  <td>{item.caseHandler || ""}</td>
+                  <td>{formatDate(item.createdAt)}</td>
+                  <td>{item.status || "Pågående"}</td>
+                  <td>{item.createdByEmail || ""}</td>
                 </tr>
               ))
             )}

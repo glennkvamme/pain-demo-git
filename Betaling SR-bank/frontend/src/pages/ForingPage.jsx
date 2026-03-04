@@ -572,6 +572,18 @@ export default function ForingPage() {
     setStatusText(`La til ${STEP_ROWS} nye linjer.`);
   }
 
+  function setTodayOnAllRows() {
+    const today = getTodayIsoDate();
+    const updatedAt = nowIsoTimestamp();
+
+    setEntries((prev) => prev.map((row) => ({
+      ...row,
+      dueDate: today,
+      rowUpdatedAt: rowHasUserContent(row) ? updatedAt : row.rowUpdatedAt,
+    })));
+    setStatusText("Satte dagens dato på alle linjer.");
+  }
+
   function isImportTargetEmpty(row) {
     return !(
       String(row.creditor || "").trim() ||
@@ -1034,9 +1046,39 @@ export default function ForingPage() {
     () => entries.map((row, index) => ({ row, index })).filter((item) => !item.row.infridd),
     [entries]
   );
+  const displayLineNumbers = useMemo(() => {
+    const usedNumbers = new Set(
+      entries
+        .map((row) => Number(row?.lineNumber || 0))
+        .filter((value) => Number.isInteger(value) && value > 0)
+    );
+
+    const numbersByIndex = new Map();
+    let nextNumber = usedNumbers.size > 0 ? Math.max(...usedNumbers) + 1 : 1;
+
+    entries.forEach((row, index) => {
+      const locked = Number(row?.lineNumber || 0);
+      if (Number.isInteger(locked) && locked > 0) {
+        numbersByIndex.set(index, locked);
+        return;
+      }
+
+      while (usedNumbers.has(nextNumber)) {
+        nextNumber += 1;
+      }
+
+      numbersByIndex.set(index, nextNumber);
+      usedNumbers.add(nextNumber);
+      nextNumber += 1;
+    });
+
+    return numbersByIndex;
+  }, [entries]);
   const isReadOnlyStatus = foringStatus === "Avsluttet" || foringStatus === "Utbetalt";
 
-  function renderEntryRow(index, row, displayNumber) {
+  function renderEntryRow(index, row) {
+    const displayLineNumber = displayLineNumbers.get(index) ?? "";
+
     return (
       <tr
         key={`row-${index}`}
@@ -1058,7 +1100,7 @@ export default function ForingPage() {
             <option value="Nei">Nei</option>
           </select>
         </td>
-          <td>{row.lineNumber || displayNumber}</td>
+          <td>{displayLineNumber}</td>
         <td>
           <input
             list="creditor-options"
@@ -1224,13 +1266,14 @@ export default function ForingPage() {
               if (isReadOnlyStatus) event.preventDefault();
             }}
           >
-            Til kunde
+            Epost til kunde
           </Link>
           <button type="button" className="secondary-btn" onClick={handleSave}>
             Lagre føring
           </button>
           <button type="submit">Generer XML</button>
         </div>
+        {statusText ? <p id="status" className="status-alert">{statusText}</p> : null}
 
         <datalist id="creditor-options">
           {creditors.map((creditor) => (
@@ -1532,15 +1575,15 @@ export default function ForingPage() {
               </tr>
             </thead>
             <tbody>
-              {rowsToInfris.map((item, order) => renderEntryRow(item.index, item.row, order + 1))}
+              {rowsToInfris.map((item) => renderEntryRow(item.index, item.row))}
               {rowsNotToInfris.length > 0 ? (
                 <tr className="section-divider-row">
                   <td colSpan={15}>Kreditorer som ikke skal innfries</td>
                 </tr>
               ) : null}
-              {rowsNotToInfris.map((item, order) => (
+              {rowsNotToInfris.map((item) => (
                 <Fragment key={`non-infridd-${item.index}`}>
-                  {renderEntryRow(item.index, item.row, rowsToInfris.length + order + 1)}
+                  {renderEntryRow(item.index, item.row)}
                   <tr className="comment-row">
                     <td colSpan={15}>
                       <div className="comment-cell">
@@ -1566,10 +1609,11 @@ export default function ForingPage() {
           <button type="button" id="add-lines" onClick={addRows} disabled={isReadOnlyStatus}>
             Flere linjer
           </button>
+          <button type="button" className="secondary-btn" onClick={setTodayOnAllRows} disabled={isReadOnlyStatus}>
+            Sett dagens dato på alle linjer
+          </button>
         </div>
       </form>
-
-      <p id="status">{statusText}</p>
     </>
   );
 }

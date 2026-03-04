@@ -129,6 +129,7 @@ app.MapPost("/api/foringer", async (HttpRequest request) =>
 
     var cloNumber = (payload?.CloNumber ?? string.Empty).Trim();
     var caseHandler = (payload?.CaseHandler ?? string.Empty).Trim();
+    var createdByEmail = (payload?.CreatedByEmail ?? string.Empty).Trim();
 
     if (string.IsNullOrWhiteSpace(cloNumber) || string.IsNullOrWhiteSpace(caseHandler))
     {
@@ -150,6 +151,7 @@ app.MapPost("/api/foringer", async (HttpRequest request) =>
             Id = Guid.NewGuid().ToString(),
             CloNumber = cloNumber,
             CaseHandler = caseHandler,
+            CreatedByEmail = createdByEmail,
             Hovedlantaker = string.Empty,
             Lantakere = new List<string>(),
             InnvilgetLaanMedPant = string.Empty,
@@ -1433,6 +1435,7 @@ sealed class CreateForingRequest
 {
     public string? CloNumber { get; set; }
     public string? CaseHandler { get; set; }
+    public string? CreatedByEmail { get; set; }
 }
 
 sealed class UpdateForingRequest
@@ -1475,6 +1478,7 @@ sealed class ForingDocument
     public string Id { get; set; } = string.Empty;
     public string CloNumber { get; set; } = string.Empty;
     public string CaseHandler { get; set; } = string.Empty;
+    public string CreatedByEmail { get; set; } = string.Empty;
     public string Hovedlantaker { get; set; } = string.Empty;
     public List<string> Lantakere { get; set; } = new();
     public string InnvilgetLaanMedPant { get; set; } = string.Empty;
