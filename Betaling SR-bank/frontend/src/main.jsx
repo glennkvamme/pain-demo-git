@@ -5,9 +5,9 @@ import { BrowserRouter } from "react-router-dom";
 import App from "./App";
 import "./styles.css";
 
-const domain = import.meta.env.VITE_AUTH0_DOMAIN;
-const clientId = import.meta.env.VITE_AUTH0_CLIENT_ID;
-const audience = import.meta.env.VITE_AUTH0_AUDIENCE;
+const domain = import.meta.env.VITE_AUTH0_DOMAIN ?? "dev-1lf3xlysx0dhdd31.us.auth0.com";
+const clientId = import.meta.env.VITE_AUTH0_CLIENT_ID ?? "zbiQFTxoAbSxDv3xllpkbpg0vNrNVWpr";
+const audience = import.meta.env.VITE_AUTH0_AUDIENCE ?? "https://betaling-api";
 const scope = import.meta.env.VITE_AUTH0_SCOPE ?? "openid profile email";
 
 if (!domain || !clientId || !audience) {
