@@ -9,6 +9,15 @@ function formatDate(value) {
   return date.toLocaleString("nb-NO");
 }
 
+function normalizeStatus(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "Pågående";
+  if (["Pågående", "Pagaende", "PÃ¥gÃ¥ende", "PÃƒÂ¥gÃƒÂ¥ende", "PÃƒÆ’Ã‚Â¥gÃƒÆ’Ã‚Â¥ende"].includes(raw)) return "Pågående";
+  if (raw === "Utbetalt") return "Utbetalt";
+  if (raw === "Avsluttet") return "Avsluttet";
+  return raw;
+}
+
 export default function DashboardPage() {
   const { getAccessTokenSilently, user } = useAuth0();
   const { authFetch } = useMemo(() => createApiClient(getAccessTokenSilently), [getAccessTokenSilently]);
@@ -82,7 +91,7 @@ export default function DashboardPage() {
   }
 
   const filteredForinger = useMemo(
-    () => foringer.filter((item) => String(item.status || "Pågående") === statusFilter),
+    () => foringer.filter((item) => normalizeStatus(item.status) === statusFilter),
     [foringer, statusFilter]
   );
 
@@ -194,7 +203,7 @@ export default function DashboardPage() {
                   <td>{item.cloNumber || ""}</td>
                   <td>{item.caseHandler || ""}</td>
                   <td>{formatDate(item.createdAt)}</td>
-                  <td>{item.status || "Pågående"}</td>
+                  <td>{normalizeStatus(item.status)}</td>
                   <td>{item.createdByEmail || ""}</td>
                 </tr>
               ))

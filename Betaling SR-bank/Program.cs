@@ -69,11 +69,68 @@ if (backupCrypto is null)
 {
     Console.Error.WriteLine("[startup] DATA_ENCRYPTION_KEY mangler eller er ugyldig. Backup XML lagres ukryptert.");
 }
+var auditLogger = new AuditLogger(Path.Combine(dataStore.DataDirectory, "logs"));
+auditLogger.CleanupOldFiles(TimeSpan.FromDays(730));
 
 app.UseDefaultFiles();
 app.UseStaticFiles();
 app.UseAuthentication();
 app.UseAuthorization();
+
+app.MapPost("/api/audit/login", (HttpContext httpContext) =>
+{
+    var actor = AuditActor.FromHttpContext(httpContext, auth0RolesClaim);
+    auditLogger.Write(new AuditLogEntry
+    {
+        EventType = "login_success",
+        ActorUserId = actor.UserId,
+        ActorEmail = actor.Email,
+        ActorRoles = actor.Roles,
+        EntityType = "session",
+        EntityId = actor.UserId,
+        Ip = actor.Ip,
+        UserAgent = actor.UserAgent,
+        Message = "Bruker logget inn."
+    });
+
+    return Results.Json(new { ok = true });
+}).RequireAuthorization("AdvisorOrAdmin");
+
+app.MapGet("/api/logs", (HttpRequest request) =>
+{
+    var dateFromText = request.Query["dateFrom"].ToString();
+    var dateToText = request.Query["dateTo"].ToString();
+    var eventType = request.Query["eventType"].ToString().Trim();
+    var actorEmail = request.Query["actorEmail"].ToString().Trim();
+    var foringId = request.Query["foringId"].ToString().Trim();
+    var cloNumber = request.Query["cloNumber"].ToString().Trim();
+    var limitText = request.Query["limit"].ToString();
+    var limit = int.TryParse(limitText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedLimit)
+        ? Math.Clamp(parsedLimit, 1, 1000)
+        : 300;
+
+    DateTime? dateFrom = null;
+    DateTime? dateTo = null;
+    if (DateTime.TryParse(dateFromText, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var parsedFrom))
+    {
+        dateFrom = parsedFrom.Date;
+    }
+
+    if (DateTime.TryParse(dateToText, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var parsedTo))
+    {
+        dateTo = parsedTo.Date;
+    }
+
+    var entries = auditLogger.Read(dateFrom, dateTo, limit)
+        .Where(entry => string.IsNullOrWhiteSpace(eventType) || string.Equals(entry.EventType, eventType, StringComparison.OrdinalIgnoreCase))
+        .Where(entry => string.IsNullOrWhiteSpace(actorEmail) || string.Equals(entry.ActorEmail, actorEmail, StringComparison.OrdinalIgnoreCase))
+        .Where(entry => string.IsNullOrWhiteSpace(foringId) || string.Equals(entry.ForingId, foringId, StringComparison.OrdinalIgnoreCase))
+        .Where(entry => string.IsNullOrWhiteSpace(cloNumber) || string.Equals(entry.CloNumber, cloNumber, StringComparison.OrdinalIgnoreCase))
+        .OrderByDescending(entry => entry.TimestampUtc)
+        .ToList();
+
+    return Results.Json(entries);
+}).RequireAuthorization("AdminOnly");
 
 app.MapGet("/api/creditors", () =>
 {
@@ -121,7 +178,7 @@ app.MapGet("/api/foringer/{id}", (string id) =>
     }
 }).RequireAuthorization("AdvisorOrAdmin");
 
-app.MapPost("/api/foringer", async (HttpRequest request) =>
+app.MapPost("/api/foringer", async (HttpRequest request, HttpContext httpContext) =>
 {
     CreateForingRequest? payload;
     try
@@ -135,7 +192,10 @@ app.MapPost("/api/foringer", async (HttpRequest request) =>
 
     var cloNumber = (payload?.CloNumber ?? string.Empty).Trim();
     var caseHandler = (payload?.CaseHandler ?? string.Empty).Trim();
-    var createdByEmail = (payload?.CreatedByEmail ?? string.Empty).Trim();
+    var actor = AuditActor.FromHttpContext(httpContext, auth0RolesClaim);
+    var createdByEmail = !string.IsNullOrWhiteSpace(actor.Email)
+        ? actor.Email
+        : (payload?.CreatedByEmail ?? string.Empty).Trim();
 
     if (string.IsNullOrWhiteSpace(cloNumber) || string.IsNullOrWhiteSpace(caseHandler))
     {
@@ -175,15 +235,44 @@ app.MapPost("/api/foringer", async (HttpRequest request) =>
 
         list.Add(created);
         dataStore.WriteForinger(list);
+        try
+        {
+            auditLogger.Write(new AuditLogEntry
+            {
+                EventType = "foring_created",
+                ActorUserId = actor.UserId,
+                ActorEmail = actor.Email,
+                ActorRoles = actor.Roles,
+                EntityType = "foring",
+                EntityId = created.Id,
+                ForingId = created.Id,
+                CloNumber = created.CloNumber,
+                Ip = actor.Ip,
+                UserAgent = actor.UserAgent,
+                Message = "Ny f??ring opprettet.",
+                Changes = new List<AuditFieldChange>
+                {
+                    new() { Field = "cloNumber", NewValue = created.CloNumber },
+                    new() { Field = "caseHandler", NewValue = created.CaseHandler },
+                    new() { Field = "createdByEmail", NewValue = created.CreatedByEmail }
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[audit] Kunne ikke logge foring_created: {ex.Message}");
+        }
+
         return Results.Json(created, statusCode: 201);
     }
-    catch
+    catch (Exception ex)
     {
+        Console.Error.WriteLine($"[foring:create] clo={cloNumber} feilet: {ex.Message}");
         return Results.Json(new { error = "Kunne ikke opprette foring." }, statusCode: 500);
     }
 }).RequireAuthorization("AdvisorOrAdmin");
 
-app.MapPut("/api/foringer/{id}", async (string id, HttpRequest request) =>
+app.MapPut("/api/foringer/{id}", async (string id, HttpRequest request, HttpContext httpContext) =>
 {
     UpdateForingRequest? payload;
     try
@@ -197,12 +286,14 @@ app.MapPut("/api/foringer/{id}", async (string id, HttpRequest request) =>
 
     try
     {
+        var actor = AuditActor.FromHttpContext(httpContext, auth0RolesClaim);
         var list = dataStore.ReadForinger();
         var item = list.FirstOrDefault(x => x.Id == id);
         if (item is null)
         {
             return Results.Json(new { error = "Fant ikke foringen." }, statusCode: 404);
         }
+        var before = ForingAuditSnapshot.From(item);
 
         if (payload?.CloNumber is not null)
         {
@@ -263,12 +354,7 @@ app.MapPut("/api/foringer/{id}", async (string id, HttpRequest request) =>
 
         if (payload?.Hovedlantaker is not null)
         {
-            var hovedlantaker = payload.Hovedlantaker.Trim();
-            if (string.IsNullOrWhiteSpace(hovedlantaker))
-            {
-                return Results.Json(new { error = "Hovedlantaker ma fylles ut." }, statusCode: 400);
-            }
-            item.Hovedlantaker = hovedlantaker;
+            item.Hovedlantaker = payload.Hovedlantaker.Trim();
         }
 
         if (payload?.Lantakere is not null)
@@ -324,10 +410,38 @@ app.MapPut("/api/foringer/{id}", async (string id, HttpRequest request) =>
 
         item.UpdatedAt = DateTime.UtcNow.ToString("o");
         dataStore.WriteForinger(list);
+        try
+        {
+            var changes = ForingAuditSnapshot.BuildChanges(before, item, payload);
+            if (changes.Count > 0)
+            {
+                auditLogger.Write(new AuditLogEntry
+                {
+                    EventType = "foring_updated",
+                    ActorUserId = actor.UserId,
+                    ActorEmail = actor.Email,
+                    ActorRoles = actor.Roles,
+                    EntityType = "foring",
+                    EntityId = item.Id,
+                    ForingId = item.Id,
+                    CloNumber = item.CloNumber,
+                    Ip = actor.Ip,
+                    UserAgent = actor.UserAgent,
+                    Message = "F??ring oppdatert.",
+                    Changes = changes
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[audit] Kunne ikke logge foring_updated: {ex.Message}");
+        }
+
         return Results.Json(item);
     }
-    catch
+    catch (Exception ex)
     {
+        Console.Error.WriteLine($"[foring:update] id={id} feilet: {ex.Message}");
         return Results.Json(new { error = "Kunne ikke oppdatere foring." }, statusCode: 500);
     }
 }).RequireAuthorization("AdvisorOrAdmin");
@@ -570,9 +684,484 @@ static string NormalizeRole(string? role)
     {
         "administrator" => "admin",
         "radgiver" => "advisor",
-        "rådgiver" => "advisor",
+        "r\u00e5dgiver" => "advisor",
+        "rÃ¥dgiver" => "advisor",
+        "rÃƒÂ¥dgiver" => "advisor",
         _ => role.Trim().ToLowerInvariant()
     };
+}
+
+sealed class AuditLogger
+{
+    private readonly string _logDirectory;
+    private readonly object _syncRoot = new();
+    private DateTime _lastCleanupDateUtc = DateTime.MinValue;
+    private readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        WriteIndented = false
+    };
+
+    public AuditLogger(string logDirectory)
+    {
+        _logDirectory = logDirectory;
+        Directory.CreateDirectory(_logDirectory);
+    }
+
+    public void Write(AuditLogEntry entry)
+    {
+        lock (_syncRoot)
+        {
+            Directory.CreateDirectory(_logDirectory);
+            if (_lastCleanupDateUtc.Date != DateTime.UtcNow.Date)
+            {
+                CleanupOldFiles(TimeSpan.FromDays(730));
+                _lastCleanupDateUtc = DateTime.UtcNow.Date;
+            }
+
+            entry.TimestampUtc = string.IsNullOrWhiteSpace(entry.TimestampUtc)
+                ? DateTime.UtcNow.ToString("o")
+                : entry.TimestampUtc;
+
+            var timestamp = DateTime.TryParse(entry.TimestampUtc, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var parsed)
+                ? parsed.ToUniversalTime()
+                : DateTime.UtcNow;
+
+            var path = Path.Combine(_logDirectory, $"audit-{timestamp:yyyy-MM-dd}.jsonl");
+            var line = JsonSerializer.Serialize(entry, _jsonOptions);
+            File.AppendAllText(path, line + Environment.NewLine, Encoding.UTF8);
+        }
+    }
+
+    public List<AuditLogEntry> Read(DateTime? dateFrom, DateTime? dateTo, int limit)
+    {
+        lock (_syncRoot)
+        {
+            Directory.CreateDirectory(_logDirectory);
+            var from = dateFrom?.Date ?? DateTime.UtcNow.Date.AddDays(-30);
+            var to = dateTo?.Date ?? DateTime.UtcNow.Date;
+            if (to < from)
+            {
+                (from, to) = (to, from);
+            }
+
+            var files = Directory.GetFiles(_logDirectory, "audit-*.jsonl")
+                .Select(path => new { Path = path, Date = ParseDateFromFile(path) })
+                .Where(item => item.Date is not null && item.Date.Value.Date >= from && item.Date.Value.Date <= to)
+                .OrderByDescending(item => item.Date)
+                .ToList();
+
+            var entries = new List<AuditLogEntry>();
+            foreach (var file in files)
+            {
+                foreach (var line in File.ReadLines(file.Path, Encoding.UTF8))
+                {
+                    if (string.IsNullOrWhiteSpace(line))
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        var entry = JsonSerializer.Deserialize<AuditLogEntry>(line, _jsonOptions);
+                        if (entry is not null)
+                        {
+                            entries.Add(entry);
+                        }
+                    }
+                    catch
+                    {
+                        // Skip malformed line and continue.
+                    }
+
+                    if (entries.Count >= limit * 3)
+                    {
+                        break;
+                    }
+                }
+
+                if (entries.Count >= limit * 3)
+                {
+                    break;
+                }
+            }
+
+            return entries
+                .OrderByDescending(entry => entry.TimestampUtc)
+                .Take(limit)
+                .ToList();
+        }
+    }
+
+    public void CleanupOldFiles(TimeSpan retention)
+    {
+        lock (_syncRoot)
+        {
+            Directory.CreateDirectory(_logDirectory);
+            var cutoff = DateTime.UtcNow.Date.Subtract(retention);
+            var files = Directory.GetFiles(_logDirectory, "audit-*.jsonl");
+            foreach (var file in files)
+            {
+                var date = ParseDateFromFile(file);
+                if (date is null || date.Value.Date >= cutoff)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    File.Delete(file);
+                }
+                catch
+                {
+                    // Ignore file delete errors.
+                }
+            }
+        }
+    }
+
+    private static DateTime? ParseDateFromFile(string path)
+    {
+        var fileName = Path.GetFileName(path);
+        if (!fileName.StartsWith("audit-", StringComparison.OrdinalIgnoreCase) ||
+            !fileName.EndsWith(".jsonl", StringComparison.OrdinalIgnoreCase) ||
+            fileName.Length < 16)
+        {
+            return null;
+        }
+
+        var dateText = fileName.Substring("audit-".Length, 10);
+        if (DateTime.TryParseExact(dateText, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var parsed))
+        {
+            return parsed.Date;
+        }
+
+        return null;
+    }
+}
+
+sealed class AuditActor
+{
+    public string UserId { get; init; } = string.Empty;
+    public string Email { get; init; } = string.Empty;
+    public List<string> Roles { get; init; } = new();
+    public string Ip { get; init; } = string.Empty;
+    public string UserAgent { get; init; } = string.Empty;
+
+    public static AuditActor FromHttpContext(HttpContext context, string rolesClaimName)
+    {
+        var user = context.User;
+        var roles = ParseRoles(user, rolesClaimName);
+        return new AuditActor
+        {
+            UserId = user.FindFirstValue(ClaimTypes.NameIdentifier)
+                ?? user.FindFirstValue("sub")
+                ?? string.Empty,
+            Email = user.FindFirstValue(ClaimTypes.Email)
+                ?? user.FindFirstValue("email")
+                ?? string.Empty,
+            Roles = roles,
+            Ip = context.Connection.RemoteIpAddress?.ToString() ?? string.Empty,
+            UserAgent = context.Request.Headers.UserAgent.ToString()
+        };
+    }
+
+    private static List<string> ParseRoles(ClaimsPrincipal user, string rolesClaimName)
+    {
+        var result = new List<string>();
+        foreach (var claim in user.FindAll(rolesClaimName))
+        {
+            var value = (claim.Value ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                continue;
+            }
+
+            if (value.StartsWith("[", StringComparison.Ordinal))
+            {
+                try
+                {
+                    var parsed = JsonSerializer.Deserialize<List<string>>(value) ?? new List<string>();
+                    result.AddRange(parsed.Select(NormalizeAuditRole).Where(role => role.Length > 0));
+                }
+                catch
+                {
+                    // Ignore malformed role claim.
+                }
+            }
+            else
+            {
+                var normalized = NormalizeAuditRole(value);
+                if (normalized.Length > 0)
+                {
+                    result.Add(normalized);
+                }
+            }
+        }
+
+        return result.Distinct(StringComparer.Ordinal).ToList();
+    }
+
+    private static string NormalizeAuditRole(string? role)
+    {
+        if (string.IsNullOrWhiteSpace(role))
+        {
+            return string.Empty;
+        }
+
+        return role.Trim().ToLowerInvariant() switch
+        {
+            "administrator" => "admin",
+            "radgiver" => "advisor",
+            "r\u00e5dgiver" => "advisor",
+            "rÃ¥dgiver" => "advisor",
+            "rÃƒÂ¥dgiver" => "advisor",
+            _ => role.Trim().ToLowerInvariant()
+        };
+    }
+}
+
+sealed class AuditFieldChange
+{
+    public string Field { get; init; } = string.Empty;
+    public string? OldValue { get; init; }
+    public string? NewValue { get; init; }
+}
+
+sealed class AuditLogEntry
+{
+    public string TimestampUtc { get; set; } = DateTime.UtcNow.ToString("o");
+    public string EventType { get; set; } = string.Empty;
+    public string ActorUserId { get; set; } = string.Empty;
+    public string ActorEmail { get; set; } = string.Empty;
+    public List<string> ActorRoles { get; set; } = new();
+    public string EntityType { get; set; } = string.Empty;
+    public string EntityId { get; set; } = string.Empty;
+    public string ForingId { get; set; } = string.Empty;
+    public string CloNumber { get; set; } = string.Empty;
+    public bool Success { get; set; } = true;
+    public string Message { get; set; } = string.Empty;
+    public List<AuditFieldChange> Changes { get; set; } = new();
+    public string Ip { get; set; } = string.Empty;
+    public string UserAgent { get; set; } = string.Empty;
+}
+
+sealed class ForingAuditSnapshot
+{
+    public string CloNumber { get; init; } = string.Empty;
+    public string CaseHandler { get; init; } = string.Empty;
+    public string Hovedlantaker { get; init; } = string.Empty;
+    public string InnvilgetLaanMedPant { get; init; } = string.Empty;
+    public string InnvilgetUsikretLaan { get; init; } = string.Empty;
+    public string Etableringshonorar { get; init; } = string.Empty;
+    public string FirstPaymentDate { get; init; } = string.Empty;
+    public string FirstPaymentAmount { get; init; } = string.Empty;
+    public string FirstPaymentKid { get; init; } = string.Empty;
+    public string Status { get; init; } = string.Empty;
+    public string LantakereText { get; init; } = string.Empty;
+    public int EntriesCount { get; init; }
+    public int LastAssignedLineNumber { get; init; }
+    public List<EntryAuditSnapshot> Entries { get; init; } = new();
+
+    public static ForingAuditSnapshot From(ForingDocument item)
+    {
+        return new ForingAuditSnapshot
+        {
+            CloNumber = item.CloNumber,
+            CaseHandler = item.CaseHandler,
+            Hovedlantaker = item.Hovedlantaker,
+            InnvilgetLaanMedPant = item.InnvilgetLaanMedPant,
+            InnvilgetUsikretLaan = item.InnvilgetUsikretLaan,
+            Etableringshonorar = item.Etableringshonorar,
+            FirstPaymentDate = item.FirstPaymentDate,
+            FirstPaymentAmount = item.FirstPaymentAmount,
+            FirstPaymentKid = item.FirstPaymentKid,
+            Status = item.Status,
+            LantakereText = string.Join(", ", item.Lantakere),
+            EntriesCount = item.Entries.Count,
+            LastAssignedLineNumber = item.LastAssignedLineNumber,
+            Entries = item.Entries.Select((entry, index) => EntryAuditSnapshot.From(entry, index)).ToList()
+        };
+    }
+
+    public static List<AuditFieldChange> BuildChanges(ForingAuditSnapshot before, ForingDocument after, UpdateForingRequest? payload)
+    {
+        var changes = new List<AuditFieldChange>();
+        AddChange(changes, "cloNumber", before.CloNumber, after.CloNumber);
+        AddChange(changes, "caseHandler", before.CaseHandler, after.CaseHandler);
+        AddChange(changes, "hovedlantaker", before.Hovedlantaker, after.Hovedlantaker);
+        AddChange(changes, "innvilgetLaanMedPant", before.InnvilgetLaanMedPant, after.InnvilgetLaanMedPant);
+        AddChange(changes, "innvilgetUsikretLaan", before.InnvilgetUsikretLaan, after.InnvilgetUsikretLaan);
+        AddChange(changes, "etableringshonorar", before.Etableringshonorar, after.Etableringshonorar);
+        AddChange(changes, "firstPaymentDate", before.FirstPaymentDate, after.FirstPaymentDate);
+        AddChange(changes, "firstPaymentAmount", before.FirstPaymentAmount, after.FirstPaymentAmount);
+        AddChange(changes, "firstPaymentKid", before.FirstPaymentKid, after.FirstPaymentKid);
+        AddChange(changes, "status", before.Status, after.Status);
+        AddChange(changes, "lantakere", before.LantakereText, string.Join(", ", after.Lantakere));
+
+        if (payload?.Entries is not null)
+        {
+            AddChange(changes, "entriesCount", before.EntriesCount.ToString(CultureInfo.InvariantCulture), after.Entries.Count.ToString(CultureInfo.InvariantCulture));
+            AddChange(changes, "lastAssignedLineNumber", before.LastAssignedLineNumber.ToString(CultureInfo.InvariantCulture), after.LastAssignedLineNumber.ToString(CultureInfo.InvariantCulture));
+            AddEntryChanges(changes, before.Entries, after.Entries.Select((entry, index) => EntryAuditSnapshot.From(entry, index)).ToList());
+        }
+
+        return changes;
+    }
+
+    private static void AddEntryChanges(List<AuditFieldChange> changes, List<EntryAuditSnapshot> beforeEntries, List<EntryAuditSnapshot> afterEntries)
+    {
+        var beforeByKey = ToUniqueKeyDictionary(beforeEntries);
+        var afterByKey = ToUniqueKeyDictionary(afterEntries);
+        var allKeys = beforeByKey.Keys.Union(afterByKey.Keys, StringComparer.Ordinal).OrderBy(key => key, StringComparer.Ordinal);
+
+        foreach (var key in allKeys)
+        {
+            beforeByKey.TryGetValue(key, out var before);
+            afterByKey.TryGetValue(key, out var after);
+
+            if (before is null && after is not null)
+            {
+                changes.Add(new AuditFieldChange
+                {
+                    Field = $"entries[{key}]",
+                    OldValue = null,
+                    NewValue = after.ToSummaryString()
+                });
+                continue;
+            }
+
+            if (before is not null && after is null)
+            {
+                changes.Add(new AuditFieldChange
+                {
+                    Field = $"entries[{key}]",
+                    OldValue = before.ToSummaryString(),
+                    NewValue = null
+                });
+                continue;
+            }
+
+            if (before is null || after is null)
+            {
+                continue;
+            }
+
+            AddChange(changes, $"entries[{key}].creditor", before.Creditor, after.Creditor);
+            AddChange(changes, $"entries[{key}].kid", before.Kid, after.Kid);
+            AddChange(changes, $"entries[{key}].customerNote", before.CustomerNote, after.CustomerNote);
+            AddChange(changes, $"entries[{key}].internalNote", before.InternalNote, after.InternalNote);
+            AddChange(changes, $"entries[{key}].accountNumber", before.AccountNumber, after.AccountNumber);
+            AddChange(changes, $"entries[{key}].amount", before.Amount, after.Amount);
+            AddChange(changes, $"entries[{key}].dueDate", before.DueDate, after.DueDate);
+            AddChange(changes, $"entries[{key}].infridd", before.InfriddText, after.InfriddText);
+            AddChange(changes, $"entries[{key}].typeKrav", before.TypeKrav, after.TypeKrav);
+            AddChange(changes, $"entries[{key}].owner", before.Owner, after.Owner);
+            AddChange(changes, $"entries[{key}].source", before.Source, after.Source);
+            AddChange(changes, $"entries[{key}].kommentar", before.Kommentar, after.Kommentar);
+        }
+
+        // Guard against huge log lines for bulk updates.
+        const int maxChanges = 250;
+        if (changes.Count > maxChanges)
+        {
+            var removed = changes.Count - maxChanges;
+            changes.RemoveRange(maxChanges, removed);
+            changes.Add(new AuditFieldChange
+            {
+                Field = "entries.truncated",
+                OldValue = null,
+                NewValue = $"Ytterligere {removed} endringer utelatt."
+            });
+        }
+    }
+
+    private static Dictionary<string, EntryAuditSnapshot> ToUniqueKeyDictionary(List<EntryAuditSnapshot> entries)
+    {
+        var result = new Dictionary<string, EntryAuditSnapshot>(StringComparer.Ordinal);
+        foreach (var entry in entries)
+        {
+            var baseKey = entry.Key;
+            var key = baseKey;
+            var duplicateIndex = 2;
+            while (result.ContainsKey(key))
+            {
+                key = $"{baseKey}~{duplicateIndex:D2}";
+                duplicateIndex += 1;
+            }
+            result[key] = entry;
+        }
+        return result;
+    }
+    private static void AddChange(List<AuditFieldChange> changes, string field, string oldValue, string newValue)
+    {
+        var safeOld = TruncateValue(oldValue);
+        var safeNew = TruncateValue(newValue);
+        if (string.Equals(safeOld ?? string.Empty, safeNew ?? string.Empty, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        changes.Add(new AuditFieldChange
+        {
+            Field = field,
+            OldValue = safeOld,
+            NewValue = safeNew
+        });
+    }
+
+    private static string TruncateValue(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return value;
+        }
+
+        const int maxLength = 220;
+        return value.Length <= maxLength ? value : value[..maxLength] + "...";
+    }
+}
+
+sealed class EntryAuditSnapshot
+{
+    public string Key { get; init; } = string.Empty;
+    public string Creditor { get; init; } = string.Empty;
+    public string Kid { get; init; } = string.Empty;
+    public string CustomerNote { get; init; } = string.Empty;
+    public string InternalNote { get; init; } = string.Empty;
+    public string AccountNumber { get; init; } = string.Empty;
+    public string Amount { get; init; } = string.Empty;
+    public string DueDate { get; init; } = string.Empty;
+    public string InfriddText { get; init; } = string.Empty;
+    public string TypeKrav { get; init; } = string.Empty;
+    public string Owner { get; init; } = string.Empty;
+    public string Source { get; init; } = string.Empty;
+    public string Kommentar { get; init; } = string.Empty;
+
+    public static EntryAuditSnapshot From(IncomingEntry entry, int index)
+    {
+        var lineNumber = entry.LineNumber > 0 ? $"ln{entry.LineNumber:D4}" : $"idx{index:D4}";
+        return new EntryAuditSnapshot
+        {
+            Key = lineNumber,
+            Creditor = (entry.Creditor ?? string.Empty).Trim(),
+            Kid = (entry.Kid ?? string.Empty).Trim(),
+            CustomerNote = (entry.CustomerNote ?? string.Empty).Trim(),
+            InternalNote = (entry.InternalNote ?? string.Empty).Trim(),
+            AccountNumber = (entry.AccountNumber ?? string.Empty).Trim(),
+            Amount = (entry.Amount ?? string.Empty).Trim(),
+            DueDate = (entry.DueDate ?? string.Empty).Trim(),
+            InfriddText = entry.Infridd ? "Ja" : "Nei",
+            TypeKrav = (entry.TypeKrav ?? string.Empty).Trim(),
+            Owner = (entry.Owner ?? string.Empty).Trim(),
+            Source = (entry.Source ?? string.Empty).Trim(),
+            Kommentar = (entry.Kommentar ?? string.Empty).Trim()
+        };
+    }
+
+    public string ToSummaryString()
+    {
+        return $"creditor={Creditor}; kid={Kid}; amount={Amount}; dueDate={DueDate}; owner={Owner}; source={Source}; typeKrav={TypeKrav}; infridd={InfriddText}";
+    }
 }
 
 sealed class BackupCrypto
@@ -1628,7 +2217,7 @@ sealed class ForingDocument
 
 static class ForingStatuses
 {
-    public const string Pagaende = "Pågående";
+    public const string Pagaende = "P\u00e5g\u00e5ende";
     public const string Avsluttet = "Avsluttet";
     public const string Utbetalt = "Utbetalt";
 
@@ -1637,7 +2226,7 @@ static class ForingStatuses
         var value = (raw ?? string.Empty).Trim();
         return value switch
         {
-            "Pågående" or "Pagaende" => Pagaende,
+            "Pågående" or "P\u00e5g\u00e5ende" or "PÃ¥gÃ¥ende" or "PÃƒÂ¥gÃƒÂ¥ende" or "Pagaende" => Pagaende,
             "Avsluttet" => Avsluttet,
             "Utbetalt" => Utbetalt,
             _ => null
@@ -1657,3 +2246,4 @@ sealed record ValidatedEntry
     public string DueDate { get; init; } = string.Empty;
     public string InstrId { get; init; } = string.Empty;
 }
+

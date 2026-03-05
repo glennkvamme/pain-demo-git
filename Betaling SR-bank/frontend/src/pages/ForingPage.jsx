@@ -106,6 +106,35 @@ function normalizeIncomingRow(row, hovedlantaker = "") {
   };
 }
 
+function toApiEntry(row) {
+  return {
+    creditor: String(row?.creditor || ""),
+    kid: String(row?.kid || ""),
+    owner: String(row?.owner || ""),
+    source: String(row?.source || ""),
+    customerNote: String(row?.customerNote || ""),
+    internalNote: String(row?.internalNote || ""),
+    kommentar: String(row?.kommentar || ""),
+    accountNumber: String(row?.accountNumber || ""),
+    amount: String(row?.amount || ""),
+    dueDate: String(row?.dueDate || ""),
+    lineNumber: Number.isInteger(row?.lineNumber) && row.lineNumber > 0 ? row.lineNumber : 0,
+    infridd: Boolean(row?.infridd),
+    typeKrav: String(row?.typeKrav || ""),
+    rowUpdatedAt: String(row?.rowUpdatedAt || ""),
+    boligLaan: Boolean(row?.boligLaan),
+  };
+}
+
+function normalizeForingStatus(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "Pågående";
+  if (["Pågående", "Pagaende", "PÃ¥gÃ¥ende", "PÃƒÂ¥gÃƒÂ¥ende", "PÃƒÆ’Ã‚Â¥gÃƒÆ’Ã‚Â¥ende"].includes(raw)) return "Pågående";
+  if (raw === "Avsluttet") return "Avsluttet";
+  if (raw === "Utbetalt") return "Utbetalt";
+  return "Pågående";
+}
+
 function ensureLockedLineNumbers(rows, nextLineNumberRef) {
   const nextRows = rows.map((row) => ({ ...row }));
   let nextLineNumber = Number(nextLineNumberRef?.current || 1);
@@ -205,7 +234,7 @@ export default function ForingPage() {
         setInnvilgetLaanMedPant(formatMetaAmountValue(foringPayload.innvilgetLaanMedPant));
         setInnvilgetUsikretLaan(formatMetaAmountValue(foringPayload.innvilgetUsikretLaan));
         setEtableringshonorar(formatMetaAmountValue(foringPayload.etableringshonorar));
-        setForingStatus(String(foringPayload.status || "Pågående"));
+        setForingStatus(normalizeForingStatus(foringPayload.status));
 
         const incomingEntries = Array.isArray(foringPayload.entries)
           ? foringPayload.entries.map((row) => normalizeIncomingRow(row, loadedHovedlantaker))
@@ -327,7 +356,7 @@ export default function ForingPage() {
   }
 
   function buildMetaPayload(nextStatus) {
-    const effectiveStatus = nextStatus || foringStatus;
+    const effectiveStatus = normalizeForingStatus(nextStatus || foringStatus);
     return {
       cloNumber: cloNumber.trim(),
       caseHandler: caseHandler.trim(),
@@ -344,7 +373,7 @@ export default function ForingPage() {
   function buildForingPayload(nextStatus) {
     return {
       ...buildMetaPayload(nextStatus),
-      entries,
+      entries: entries.map((row) => toApiEntry(row)),
     };
   }
 
@@ -370,7 +399,7 @@ export default function ForingPage() {
 
   useEffect(() => {
     if (!isLoaded) return;
-    if (!caseHandler.trim() || !cloNumber.trim() || !hovedlantaker.trim()) return;
+    if (!caseHandler.trim() || !cloNumber.trim()) return;
     const immediate = blurMetaSaveRequestedRef.current;
     blurMetaSaveRequestedRef.current = false;
 
@@ -400,7 +429,7 @@ export default function ForingPage() {
 
   useEffect(() => {
     if (!isLoaded) return;
-    if (!caseHandler.trim() || !cloNumber.trim() || !hovedlantaker.trim()) return;
+    if (!caseHandler.trim() || !cloNumber.trim()) return;
     if (liveValidation.hasInvalid) return;
     const immediate = blurEntrySaveRequestedRef.current;
     blurEntrySaveRequestedRef.current = false;
@@ -959,8 +988,8 @@ export default function ForingPage() {
   }
 
   async function handleSave() {
-    if (!caseHandler.trim() || !cloNumber.trim() || !hovedlantaker.trim()) {
-      setStatusText("Saksbehandler, CLO nummer og hovedlantaker ma fylles ut.");
+    if (!caseHandler.trim() || !cloNumber.trim()) {
+      setStatusText("Saksbehandler og CLO nummer ma fylles ut.");
       return;
     }
 
@@ -981,8 +1010,8 @@ export default function ForingPage() {
   async function handleSubmit(event) {
     event.preventDefault();
 
-    if (!caseHandler.trim() || !cloNumber.trim() || !hovedlantaker.trim()) {
-      setStatusText("Saksbehandler, CLO nummer og hovedlantaker ma fylles ut.");
+    if (!caseHandler.trim() || !cloNumber.trim()) {
+      setStatusText("Saksbehandler og CLO nummer ma fylles ut.");
       return;
     }
 

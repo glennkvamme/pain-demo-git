@@ -1,9 +1,11 @@
 import { useAuth0 } from "@auth0/auth0-react";
+import { useEffect } from "react";
 import { NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import DashboardPage from "./pages/DashboardPage";
 import ForingPage from "./pages/ForingPage";
 import CreditorsPage from "./pages/CreditorsPage";
 import HistoryPage from "./pages/HistoryPage";
+import LoggPage from "./pages/LoggPage";
 import TilKundePage from "./pages/TilKundePage";
 
 const ROLE_ADMIN = "admin";
@@ -48,6 +50,7 @@ function SideMenu({ isAdmin }) {
           <NavLink className={linkClass} to="/">Oversikt</NavLink>
           {isAdmin ? <NavLink className={linkClass} to="/creditors">Vedlikehold kreditorliste</NavLink> : null}
           {isAdmin ? <NavLink className={linkClass} to="/history">Historikk og backup</NavLink> : null}
+          {isAdmin ? <NavLink className={linkClass} to="/logs">Logg</NavLink> : null}
         </>
       )}
     </nav>
@@ -77,7 +80,7 @@ function Layout({ children, isAdmin }) {
         <SideMenu isAdmin={isAdmin} />
         <section className="content-area">
           {children}
-          <footer className="page-version">Versjon v.2.2.1</footer>
+          <footer className="page-version">Versjon v.2.2.2</footer>
         </section>
       </div>
     </main>
@@ -154,7 +157,7 @@ function RequireRole({ allowedRoles, userRoles, children }) {
 }
 
 export default function App() {
-  const { isAuthenticated, isLoading, error, user } = useAuth0();
+  const { isAuthenticated, isLoading, error, user, getAccessTokenSilently } = useAuth0();
   const userRoles = extractRoles(user);
   const isAdmin = hasRole(userRoles, ROLE_ADMIN);
   const hasKnownRole = isAdmin || hasRole(userRoles, ROLE_ADVISOR);
@@ -162,6 +165,45 @@ export default function App() {
   const query = new URLSearchParams(window.location.search);
   const auth0Error = query.get("error_description") ?? query.get("error");
   const authErrorMessage = error?.message ?? auth0Error;
+
+  useEffect(() => {
+    if (!isAuthenticated || !user?.sub) {
+      return;
+    }
+
+    const dayKey = new Date().toISOString().slice(0, 10);
+    const marker = `audit-login:${user.sub}:${dayKey}`;
+    if (window.sessionStorage.getItem(marker) === "1") {
+      return;
+    }
+
+    let isCancelled = false;
+
+    async function trackLogin() {
+      try {
+        const token = await getAccessTokenSilently();
+        const response = await fetch("/api/audit/login", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`
+          }
+        });
+
+        if (isCancelled || !response.ok) {
+          return;
+        }
+
+        window.sessionStorage.setItem(marker, "1");
+      } catch {
+        // Ignore telemetry errors to avoid blocking the UI.
+      }
+    }
+
+    trackLogin();
+    return () => {
+      isCancelled = true;
+    };
+  }, [isAuthenticated, user?.sub, getAccessTokenSilently]);
 
   if (isLoading) {
     return <LoadingView />;
@@ -200,6 +242,14 @@ export default function App() {
           element={(
             <RequireRole allowedRoles={[ROLE_ADMIN]} userRoles={userRoles}>
               <HistoryPage />
+            </RequireRole>
+          )}
+        />
+        <Route
+          path="/logs"
+          element={(
+            <RequireRole allowedRoles={[ROLE_ADMIN]} userRoles={userRoles}>
+              <LoggPage />
             </RequireRole>
           )}
         />
