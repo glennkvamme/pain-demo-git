@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Security;
 using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Xml;
@@ -62,6 +63,11 @@ catch (Exception ex)
     Console.Error.WriteLine("[startup] Faller tilbake til ContentRootPath for datalagring.");
     dataStore = new DataStore(app.Environment.ContentRootPath, app.Environment.ContentRootPath);
     dataStore.EnsureStores();
+}
+var backupCrypto = BackupCrypto.TryCreateFromEnvironment();
+if (backupCrypto is null)
+{
+    Console.Error.WriteLine("[startup] DATA_ENCRYPTION_KEY mangler eller er ugyldig. Backup XML lagres ukryptert.");
 }
 
 app.UseDefaultFiles();
@@ -376,6 +382,20 @@ app.MapGet("/api/history/{id}/download", (string id) =>
             return Results.Json(new { error = "Backup-filen finnes ikke." }, statusCode: 404);
         }
 
+        if (backupCrypto is not null)
+        {
+            var raw = File.ReadAllBytes(fullPath);
+            if (BackupCrypto.IsEncryptedPayload(raw))
+            {
+                if (!backupCrypto.TryDecrypt(raw, out var xml))
+                {
+                    return Results.Json(new { error = "Kunne ikke dekryptere backup-fil." }, statusCode: 500);
+                }
+
+                return Results.File(Encoding.UTF8.GetBytes(xml), "application/octet-stream", entry.GeneratedFileName ?? entry.BackupFileName);
+            }
+        }
+
         return Results.File(fullPath, "application/octet-stream", entry.GeneratedFileName ?? entry.BackupFileName);
     }
     catch
@@ -443,7 +463,15 @@ app.MapPost("/api/pain001", async (HttpRequest request) =>
     var generatedFileName = PainXml.BuildGeneratedFileName(DateTime.Now);
     var backupFileName = $"pain001_{compactStamp}_{Guid.NewGuid().ToString("N")[..8]}.xml";
 
-    File.WriteAllText(Path.Combine(dataStore.BackupDirectory, backupFileName), xml);
+    var backupPath = Path.Combine(dataStore.BackupDirectory, backupFileName);
+    if (backupCrypto is null)
+    {
+        File.WriteAllText(backupPath, xml, Encoding.UTF8);
+    }
+    else
+    {
+        File.WriteAllBytes(backupPath, backupCrypto.Encrypt(xml));
+    }
 
     var historyEntries = dataStore.ReadHistory();
     historyEntries.Add(new HistoryEntry
@@ -545,6 +573,110 @@ static string NormalizeRole(string? role)
         "rådgiver" => "advisor",
         _ => role.Trim().ToLowerInvariant()
     };
+}
+
+sealed class BackupCrypto
+{
+    private static readonly byte[] Magic = "KBX1"u8.ToArray();
+    private readonly byte[] _key;
+
+    private BackupCrypto(byte[] key)
+    {
+        _key = key;
+    }
+
+    public static BackupCrypto? TryCreateFromEnvironment()
+    {
+        var raw = (Environment.GetEnvironmentVariable("DATA_ENCRYPTION_KEY") ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return null;
+        }
+
+        try
+        {
+            var key = Convert.FromBase64String(raw);
+            if (key.Length != 32)
+            {
+                return null;
+            }
+
+            return new BackupCrypto(key);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public static bool IsEncryptedPayload(ReadOnlySpan<byte> data)
+    {
+        if (data.Length < Magic.Length + 12 + 16)
+        {
+            return false;
+        }
+
+        return data[..Magic.Length].SequenceEqual(Magic);
+    }
+
+    public byte[] Encrypt(string plaintext)
+    {
+        var plainBytes = Encoding.UTF8.GetBytes(plaintext);
+        var nonce = new byte[12];
+        RandomNumberGenerator.Fill(nonce);
+        var ciphertext = new byte[plainBytes.Length];
+        var tag = new byte[16];
+
+        using (var aes = new AesGcm(_key, 16))
+        {
+            aes.Encrypt(nonce, plainBytes, ciphertext, tag);
+        }
+
+        var output = new byte[Magic.Length + nonce.Length + tag.Length + ciphertext.Length];
+        Magic.CopyTo(output, 0);
+        nonce.CopyTo(output, Magic.Length);
+        tag.CopyTo(output, Magic.Length + nonce.Length);
+        ciphertext.CopyTo(output, Magic.Length + nonce.Length + tag.Length);
+        return output;
+    }
+
+    public bool TryDecrypt(byte[] payload, out string plaintext)
+    {
+        plaintext = string.Empty;
+        if (!IsEncryptedPayload(payload))
+        {
+            return false;
+        }
+
+        var nonceOffset = Magic.Length;
+        var tagOffset = nonceOffset + 12;
+        var ciphertextOffset = tagOffset + 16;
+        var ciphertextLength = payload.Length - ciphertextOffset;
+        if (ciphertextLength <= 0)
+        {
+            return false;
+        }
+
+        var nonce = payload.AsSpan(nonceOffset, 12).ToArray();
+        var tag = payload.AsSpan(tagOffset, 16).ToArray();
+        var ciphertext = payload.AsSpan(ciphertextOffset, ciphertextLength).ToArray();
+        var plainBytes = new byte[ciphertextLength];
+
+        try
+        {
+            using (var aes = new AesGcm(_key, 16))
+            {
+                aes.Decrypt(nonce, ciphertext, tag, plainBytes);
+            }
+
+            plaintext = Encoding.UTF8.GetString(plainBytes);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 }
 
 sealed class DataStore(string rootPath, string seedRootPath)

@@ -1,4 +1,4 @@
-﻿import { useAuth0 } from "@auth0/auth0-react";
+import { useAuth0 } from "@auth0/auth0-react";
 import { NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import DashboardPage from "./pages/DashboardPage";
 import ForingPage from "./pages/ForingPage";
@@ -77,7 +77,7 @@ function Layout({ children, isAdmin }) {
         <SideMenu isAdmin={isAdmin} />
         <section className="content-area">
           {children}
-          <footer className="page-version">Versjon v.2.2.0</footer>
+          <footer className="page-version">Versjon v.2.2.1</footer>
         </section>
       </div>
     </main>
@@ -216,5 +216,6 @@ export default function App() {
     </Layout>
   );
 }
+
 
 
