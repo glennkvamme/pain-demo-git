@@ -48,27 +48,13 @@ body {
   box-shadow: var(--shadow);
 }
 
-.page-layout {
-  display: grid;
-  grid-template-columns: 230px minmax(0, 1fr);
-  gap: 18px;
-  align-items: start;
-}
-
-.side-menu {
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: #f8fbff;
-  padding: 12px;
-  position: sticky;
-  top: 14px;
-}
-
-.menu-title {
-  margin: 0 0 10px;
-  color: #324a63;
-  font-size: 0.9rem;
-  font-weight: 700;
+.top-menu {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 0 14px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 18px;
 }
 
 .content-area {
@@ -115,8 +101,8 @@ p {
 }
 
 .manage-link {
-  display: block;
-  margin: 0 0 8px;
+  display: inline-block;
+  margin: 0;
   padding: 10px 12px;
   border: 1px solid #cbd6e2;
   border-radius: 10px;
@@ -256,6 +242,20 @@ td {
 
 .row-boliglaan td {
   background: #f1fbf4;
+}
+
+.th-sortable {
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.th-sortable:hover {
+  background: #e8f0f8;
+}
+
+.row-same-date td {
+  background: #e6f4ea;
 }
 
 .row-empty-creditor td {
@@ -409,6 +409,16 @@ button:hover {
 .secondary-btn:hover {
   background: #f3f7fb;
   box-shadow: 0 8px 18px rgba(37, 76, 114, 0.16);
+}
+
+.success-btn {
+  background: #1f6b3a;
+  color: #ffffff;
+}
+
+.success-btn:hover {
+  background: #17542e;
+  box-shadow: 0 8px 18px rgba(23, 84, 46, 0.28);
 }
 
 .delete-btn {
@@ -700,15 +710,6 @@ button:disabled {
     height: 44px;
   }
 
-  .page-layout {
-    grid-template-columns: 1fr;
-    gap: 12px;
-  }
-
-  .side-menu {
-    position: static;
-  }
-
   .meta-grid,
   .summary-grid {
     grid-template-columns: 1fr;
@@ -730,11 +731,6 @@ button:disabled {
 
   .card {
     width: calc(100vw - 20px);
-  }
-
-  .page-layout {
-    grid-template-columns: 260px minmax(0, 1fr);
-    gap: 20px;
   }
 
   .brand-logo {

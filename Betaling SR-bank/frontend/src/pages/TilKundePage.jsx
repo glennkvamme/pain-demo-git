@@ -38,6 +38,7 @@ export default function TilKundePage() {
   const [statusText, setStatusText] = useState("");
   const [isLoaded, setIsLoaded] = useState(false);
   const [cloNumber, setCloNumber] = useState("");
+  const [foringStatus, setForingStatus] = useState("");
   const [rows, setRows] = useState([]);
   const [kraftBankHonorar, setKraftBankHonorar] = useState("");
   const [firstPaymentDate, setFirstPaymentDate] = useState(() => getDefaultFirstPaymentDate());
@@ -63,6 +64,7 @@ export default function TilKundePage() {
         if (!active) return;
 
         setCloNumber(String(payload.cloNumber || ""));
+        setForingStatus(String(payload.status || ""));
         setKraftBankHonorar(String(payload.etableringshonorar || ""));
         setFirstPaymentDate(String(payload.firstPaymentDate || "").trim() || getDefaultFirstPaymentDate());
         setFirstPaymentAmount(String(payload.firstPaymentAmount || ""));
@@ -102,6 +104,7 @@ export default function TilKundePage() {
 
   useEffect(() => {
     if (!isLoaded) return;
+    if (foringStatus === "Utbetalt") return;
     const immediate = blurSaveRequestedRef.current;
     blurSaveRequestedRef.current = false;
 
@@ -133,7 +136,7 @@ export default function TilKundePage() {
     return () => {
       window.clearTimeout(timer);
     };
-  }, [foringId, isLoaded, firstPaymentDate, firstPaymentAmount, firstPaymentKid, saveTrigger]);
+  }, [foringId, isLoaded, foringStatus, firstPaymentDate, firstPaymentAmount, firstPaymentKid, saveTrigger]);
 
   const listRows = useMemo(() => {
     return rows
@@ -186,6 +189,7 @@ export default function TilKundePage() {
     return accountNumber || "xx2";
   }, [rows]);
   const del1KidText = String(firstPaymentKid || "").replace(/\s+/g, "").trim();
+  const isReadOnlyStatus = foringStatus === "Utbetalt";
 
   async function copyListToClipboard() {
     const cleanKid = String(firstPaymentKid || "").replace(/\s+/g, "").trim();
@@ -321,6 +325,7 @@ export default function TilKundePage() {
               value={firstPaymentDate}
               onChange={(event) => setFirstPaymentDate(event.target.value)}
               onBlur={requestBlurSave}
+              disabled={isReadOnlyStatus}
             />
           </div>
           <div className="first-payment-row">
@@ -333,6 +338,7 @@ export default function TilKundePage() {
               value={firstPaymentAmount}
               onChange={(event) => setFirstPaymentAmount(event.target.value)}
               onBlur={requestBlurSave}
+              disabled={isReadOnlyStatus}
             />
           </div>
           <div className="first-payment-row">
@@ -350,6 +356,7 @@ export default function TilKundePage() {
                 }
                 requestBlurSave();
               }}
+              disabled={isReadOnlyStatus}
             />
           </div>
           <p className="first-payment-account">Kontonummer: {FIRST_PAYMENT_ACCOUNT}</p>
@@ -405,6 +412,7 @@ export default function TilKundePage() {
         </section>
       </section>
 
+      {isReadOnlyStatus ? <p className="status-alert">Saken er utbetalt og kan ikke redigeres.</p> : null}
       <p id="til-kunde-status">{statusText}</p>
     </>
   );

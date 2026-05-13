@@ -28,6 +28,13 @@ export default function DashboardPage() {
   const [statusText, setStatusText] = useState("");
   const [statusFilter, setStatusFilter] = useState("Pågående");
   const navigate = useNavigate();
+  const normalizedCloNumber = cloNumber.trim().toLowerCase();
+  const cloAlreadyExists = useMemo(
+    () =>
+      normalizedCloNumber.length > 0 &&
+      foringer.some((item) => String(item?.cloNumber || "").trim().toLowerCase() === normalizedCloNumber),
+    [foringer, normalizedCloNumber]
+  );
 
   async function loadForinger() {
     try {
@@ -47,6 +54,10 @@ export default function DashboardPage() {
   async function createForing() {
     if (!cloNumber.trim() || !caseHandler.trim()) {
       setStatusText("CLO nummer og saksbehandler ma fylles ut.");
+      return;
+    }
+    if (cloAlreadyExists) {
+      setStatusText("CLO nummer finnes allerede. Velg et unikt CLO nummer.");
       return;
     }
 
@@ -149,6 +160,7 @@ export default function DashboardPage() {
                   name="newCloNumber"
                   type="text"
                   required
+                  className={cloAlreadyExists ? "input-invalid" : ""}
                   value={cloNumber}
                   onChange={(event) => setCloNumber(event.target.value)}
                 />
@@ -164,8 +176,12 @@ export default function DashboardPage() {
                 />
               </section>
 
+              {cloAlreadyExists ? (
+                <p className="status-alert">CLO nummer finnes allerede. Velg et unikt CLO nummer.</p>
+              ) : null}
+
               <div className="actions actions-left modal-actions">
-                <button type="submit">Opprett</button>
+                <button type="submit" disabled={cloAlreadyExists}>Opprett</button>
                 <button type="button" className="secondary-btn" onClick={closeCreateModal}>
                   Avbryt
                 </button>

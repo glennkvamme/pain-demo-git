@@ -31,7 +31,7 @@ function extractRoles(user) {
   return rawRoles.map(normalizeRole).filter(Boolean);
 }
 
-function SideMenu({ isAdmin }) {
+function TopMenu({ isAdmin }) {
   const location = useLocation();
   const linkClass = ({ isActive }) => `manage-link${isActive ? " active" : ""}`;
   const pathParts = location.pathname.split("/").filter(Boolean);
@@ -39,12 +39,9 @@ function SideMenu({ isAdmin }) {
   const isForingContext = Boolean(foringId);
 
   return (
-    <nav className="side-menu" aria-label="Sidenavigasjon">
-      <p className="menu-title">Meny</p>
+    <nav className="top-menu" aria-label="Navigasjon">
       {isForingContext ? (
-        <>
-          <NavLink className={linkClass} to="/">Oversikt</NavLink>
-        </>
+        <NavLink className={linkClass} to="/">Oversikt</NavLink>
       ) : (
         <>
           <NavLink className={linkClass} to="/">Oversikt</NavLink>
@@ -76,13 +73,11 @@ function Layout({ children, isAdmin }) {
           </button>
         </div>
       </header>
-      <div className="page-layout">
-        <SideMenu isAdmin={isAdmin} />
-        <section className="content-area">
-          {children}
-          <footer className="page-version">Versjon v.2.2.2</footer>
-        </section>
-      </div>
+      <TopMenu isAdmin={isAdmin} />
+      <section className="content-area">
+        {children}
+        <footer className="page-version">Versjon v.2.3.0</footer>
+      </section>
     </main>
   );
 }

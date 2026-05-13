@@ -1,6 +1,8 @@
-﻿import { useAuth0 } from "@auth0/auth0-react";
+import { useAuth0 } from "@auth0/auth0-react";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import { jsPDF } from "jspdf";
+import autoTable from "jspdf-autotable";
 import {
   extractFilenameFromDisposition,
   formatAmount,
@@ -16,6 +18,9 @@ import { createApiClient } from "../apiClient";
 const INITIAL_ROWS = 5;
 const STEP_ROWS = 5;
 const AUTOSAVE_DELAY_MS = 1500;
+const FIRST_PAYMENT_ACCOUNT = "3207 22 78835";
+const rolesClaim = import.meta.env.VITE_AUTH0_ROLES_CLAIM ?? "https://betaling-app/roles";
+const ADMIN_ALIASES = new Set(["admin", "administrator"]);
 
 function nowIsoTimestamp() {
   return new Date().toISOString();
@@ -75,6 +80,7 @@ function createEmptyRow(hovedlantaker = "") {
     typeKrav: "",
     rowUpdatedAt: "",
     boligLaan: false,
+    fullmakt: "Nei",
   };
 }
 
@@ -103,6 +109,7 @@ function normalizeIncomingRow(row, hovedlantaker = "") {
       : (hasUserContent ? "Annet" : ""),
     rowUpdatedAt: String(row?.rowUpdatedAt || (hasUserContent ? nowIsoTimestamp() : "")),
     boligLaan: Boolean(row?.boligLaan),
+    fullmakt: ["Sendt", "Nei"].includes(String(row?.fullmakt || "")) ? String(row.fullmakt) : "Nei",
   };
 }
 
@@ -123,16 +130,43 @@ function toApiEntry(row) {
     typeKrav: String(row?.typeKrav || ""),
     rowUpdatedAt: String(row?.rowUpdatedAt || ""),
     boligLaan: Boolean(row?.boligLaan),
+    fullmakt: String(row?.fullmakt || "Nei"),
   };
 }
 
 function normalizeForingStatus(value) {
   const raw = String(value || "").trim();
   if (!raw) return "Pågående";
-  if (["Pågående", "Pagaende", "PÃ¥gÃ¥ende", "PÃƒÂ¥gÃƒÂ¥ende", "PÃƒÆ’Ã‚Â¥gÃƒÆ’Ã‚Â¥ende"].includes(raw)) return "Pågående";
+  if (["Pågående", "Pagaende", "PÃƒÂ¥gÃƒÂ¥ende", "PÃƒÆ’Ã‚Â¥gÃƒÆ’Ã‚Â¥ende", "PÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¥gÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¥ende"].includes(raw)) return "Pågående";
   if (raw === "Avsluttet") return "Avsluttet";
   if (raw === "Utbetalt") return "Utbetalt";
   return "Pågående";
+}
+
+function formatDateForPdf(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const date = new Date(text);
+  if (Number.isNaN(date.getTime())) return text;
+  return date.toLocaleDateString("nb-NO");
+}
+
+function rowDatesMatch(row) {
+  const dueDateStr = String(row?.dueDate || "").trim();
+  const updatedAtStr = String(row?.rowUpdatedAt || "").trim();
+  if (!dueDateStr || !updatedAtStr) return true;
+  const d = new Date(updatedAtStr);
+  if (Number.isNaN(d.getTime())) return true;
+  const localDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  return dueDateStr === localDate;
+}
+
+function normalizeRole(role) {
+  return String(role ?? "")
+    .toLowerCase()
+    .trim()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
 }
 
 function ensureLockedLineNumbers(rows, nextLineNumberRef) {
@@ -166,7 +200,7 @@ function ensureLockedLineNumbers(rows, nextLineNumberRef) {
 }
 
 export default function ForingPage() {
-  const { getAccessTokenSilently } = useAuth0();
+  const { getAccessTokenSilently, user } = useAuth0();
   const { authFetch } = useMemo(() => createApiClient(getAccessTokenSilently), [getAccessTokenSilently]);
   const { foringId } = useParams();
   const [entries, setEntries] = useState(() =>
@@ -183,6 +217,11 @@ export default function ForingPage() {
   const [statusText, setStatusText] = useState("");
   const [showImportModal, setShowImportModal] = useState(false);
   const [importMode, setImportMode] = useState("inkasso");
+  const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [confirmConfig, setConfirmConfig] = useState({ message: "", onJa: null, onNei: null });
+  const [showXmlWarningModal, setShowXmlWarningModal] = useState(false);
+  const [xmlMismatchRows, setXmlMismatchRows] = useState([]);
+  const pendingXmlEntriesRef = useRef(null);
   const [importText, setImportText] = useState("");
   const [importPreviewRows, setImportPreviewRows] = useState([]);
   const [importPreviewError, setImportPreviewError] = useState("");
@@ -196,6 +235,11 @@ export default function ForingPage() {
   const blurMetaSaveRequestedRef = useRef(false);
   const blurEntrySaveRequestedRef = useRef(false);
   const nextLineNumberRef = useRef(1);
+  const isAdmin = useMemo(() => {
+    const rawRoles = user?.[rolesClaim];
+    if (!Array.isArray(rawRoles)) return false;
+    return rawRoles.map(normalizeRole).some((role) => ADMIN_ALIASES.has(role));
+  }, [user]);
 
   useEffect(() => {
     let active = true;
@@ -599,6 +643,53 @@ export default function ForingPage() {
   function addRows() {
     setEntries((prev) => ensureLockedLineNumbers([...prev, ...Array.from({ length: STEP_ROWS }, () => createEmptyRow(hovedlantaker))], nextLineNumberRef));
     setStatusText(`La til ${STEP_ROWS} nye linjer.`);
+  }
+
+  function deleteRowsBySource(source) {
+    setEntries((prev) => {
+      const filtered = prev.filter((row) => String(row.source || "") !== source);
+      if (filtered.length === 0) {
+        return [{ ...createEmptyRow(hovedlantaker), boligLaan: true }];
+      }
+      if (!filtered.some((row) => row.boligLaan)) {
+        filtered[0] = { ...filtered[0], boligLaan: true };
+      }
+      return ensureLockedLineNumbers(filtered, nextLineNumberRef);
+    });
+  }
+
+  function showConfirm(message, onJa, onNei) {
+    setConfirmConfig({ message, onJa: onJa ?? null, onNei: onNei ?? null });
+    setShowConfirmModal(true);
+  }
+
+  function openImportModal(mode) {
+    const sourceByMode = {
+      inkasso: "Inkassoregister",
+      gjeld: "Rammelån Gjeldsregister",
+      nedbetaling: "Nedbetalingslån Gjeldsregister",
+    };
+    const source = sourceByMode[mode];
+    const hasExisting = entries.some((row) => String(row.source || "") === source && rowHasUserContent(row));
+
+    function doOpen(deleteFirst) {
+      if (deleteFirst) deleteRowsBySource(source);
+      setImportMode(mode);
+      setImportText("");
+      setImportPreviewRows([]);
+      setImportPreviewError("");
+      setShowImportModal(true);
+    }
+
+    if (hasExisting) {
+      showConfirm(
+        `Det finnes allerede føringer fra ${source}. Vil du slette disse før du importerer på nytt?`,
+        () => doOpen(true),
+        () => doOpen(false)
+      );
+    } else {
+      doOpen(false);
+    }
   }
 
   function setTodayOnAllRows() {
@@ -1007,28 +1098,8 @@ export default function ForingPage() {
     }
   }
 
-  async function handleSubmit(event) {
-    event.preventDefault();
-
-    if (!caseHandler.trim() || !cloNumber.trim()) {
-      setStatusText("Saksbehandler og CLO nummer ma fylles ut.");
-      return;
-    }
-
-    if (liveValidation.hasInvalid) {
-      setStatusText("Rett ugyldig KID/kontonummer før XML-generering.");
-      return;
-    }
-
-    const filteredEntries = entries.filter((row) => row.creditor.trim() && row.infridd);
-
-    if (filteredEntries.length === 0) {
-      setStatusText("Fyll ut minst en linje for a generere XML.");
-      return;
-    }
-
+  async function doGenerateXml(filteredEntries) {
     setStatusText(`Genererer XML for ${filteredEntries.length} foringer...`);
-
     try {
       await saveForing();
 
@@ -1066,14 +1137,240 @@ export default function ForingPage() {
     }
   }
 
+  async function handleSubmit(event) {
+    event.preventDefault();
+
+    if (!caseHandler.trim() || !cloNumber.trim()) {
+      setStatusText("Saksbehandler og CLO nummer ma fylles ut.");
+      return;
+    }
+
+    if (liveValidation.hasInvalid) {
+      setStatusText("Rett ugyldig KID/kontonummer før XML-generering.");
+      return;
+    }
+
+    const filteredEntries = entries.filter((row) => row.creditor.trim() && row.infridd);
+
+    if (filteredEntries.length === 0) {
+      setStatusText("Fyll ut minst en linje for a generere XML.");
+      return;
+    }
+
+    const mismatchRows = entries.filter((row) => rowHasUserContent(row) && !rowDatesMatch(row));
+    if (mismatchRows.length > 0) {
+      pendingXmlEntriesRef.current = filteredEntries;
+      setXmlMismatchRows(mismatchRows);
+      setShowXmlWarningModal(true);
+      return;
+    }
+
+    await doGenerateXml(filteredEntries);
+  }
+
+  async function generateSettlementPdfWithLatestData() {
+    const response = await authFetch(`/api/foringer/${foringId}`);
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({ error: "Ukjent feil." }));
+      throw new Error(body.error || "Kunne ikke hente oppdaterte data for PDF.");
+    }
+
+    const payload = await response.json();
+    const pdf = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
+    const generatedAt = new Date().toLocaleString("nb-NO");
+    const clo = String(payload?.cloNumber || cloNumber || "").trim();
+    const rows = Array.isArray(payload?.entries) ? payload.entries : [];
+    const usedRows = rows.filter((row) =>
+      String(row?.creditor || "").trim() ||
+      String(row?.kid || "").trim() ||
+      String(row?.customerNote || "").trim() ||
+      String(row?.internalNote || "").trim() ||
+      String(row?.kommentar || "").trim() ||
+      String(row?.accountNumber || "").trim() ||
+      String(row?.amount || "").trim() ||
+      String(row?.dueDate || "").trim()
+    );
+
+    const sumAmount = usedRows.reduce((sum, row) => sum + (parseAmountInput(String(row?.amount || "")) || 0), 0);
+    const remainingLoanFrame = (parseAmountInput(String(payload?.innvilgetLaanMedPant || "")) || 0)
+      + (parseAmountInput(String(payload?.innvilgetUsikretLaan || "")) || 0)
+      - sumAmount;
+
+    pdf.setFontSize(14);
+    pdf.text(`Utbetalingsrapport - CLO ${clo || "-"}`, 14, 14);
+    pdf.setFontSize(10);
+    pdf.text(`Generert: ${generatedAt}`, 14, 20);
+
+    const metaRows = [
+      ["Saksbehandler", String(payload?.caseHandler || "")],
+      ["CLO nummer", clo],
+      ["Status", String(payload?.status || "")],
+      ["Hovedlåntaker", String(payload?.hovedlantaker || "")],
+      ["Låntakere", Array.isArray(payload?.lantakere) ? payload.lantakere.join(", ") : ""],
+      ["Innvilget lån med pant", String(payload?.innvilgetLaanMedPant || "")],
+      ["Innvilget usikret lån", String(payload?.innvilgetUsikretLaan || "")],
+      ["Etableringsgebyr", String(payload?.etableringshonorar || "")],
+      ["Planlagt utbetalt", formatAmount(sumAmount)],
+      ["Antall linjer brukt", String(usedRows.length)],
+      ["Igjen av total låneramme", formatAmount(remainingLoanFrame)],
+      ["Første innbetaling dato", formatDateForPdf(payload?.firstPaymentDate)],
+      ["Første innbetaling beløp", String(payload?.firstPaymentAmount || "")],
+      ["Første innbetaling KID", String(payload?.firstPaymentKid || "")],
+      ["Første innbetaling kontonr", FIRST_PAYMENT_ACCOUNT],
+    ];
+
+    autoTable(pdf, {
+      startY: 24,
+      theme: "grid",
+      styles: { fontSize: 9, cellPadding: 2 },
+      head: [["Felt", "Verdi"]],
+      body: metaRows,
+      columnStyles: { 0: { cellWidth: 65 }, 1: { cellWidth: 200 } },
+    });
+
+    const tableRows = usedRows.map((row, index) => [
+      String(row?.lineNumber || index + 1),
+      String(row?.typeKrav || ""),
+      String(row?.fullmakt || "Nei"),
+      String(row?.creditor || ""),
+      String(row?.kid || ""),
+      String(row?.customerNote || ""),
+      String(row?.internalNote || ""),
+      String(row?.accountNumber || ""),
+      String(row?.amount || ""),
+      formatDateForPdf(row?.dueDate),
+      row?.infridd ? "Ja" : "Nei",
+      String(row?.owner || ""),
+      String(row?.source || ""),
+      String(row?.kommentar || ""),
+    ]);
+
+    autoTable(pdf, {
+      startY: pdf.lastAutoTable?.finalY ? pdf.lastAutoTable.finalY + 6 : 120,
+      theme: "grid",
+      styles: { fontSize: 8, cellPadding: 1.6 },
+      head: [[
+        "#",
+        "Type krav",
+        "Fullmakt",
+        "Kreditor",
+        "KID",
+        "Notat kunde",
+        "Internt notat",
+        "Kontonummer",
+        "Beløp",
+        "Dato",
+        "Skal innfris",
+        "Eier",
+        "Kilde",
+        "Kommentar",
+      ]],
+      body: tableRows.length > 0 ? tableRows : [["", "", "", "Ingen rader", "", "", "", "", "", "", "", "", "", ""]],
+    });
+
+    pdf.save(`utbetalt_CLO_${clo || foringId}.pdf`);
+  }
+
+  async function handleSetAsPaid() {
+    if (!caseHandler.trim() || !cloNumber.trim()) {
+      setStatusText("Saksbehandler og CLO nummer ma fylles ut.");
+      return;
+    }
+
+    if (liveValidation.hasInvalid) {
+      setStatusText("Rett ugyldig KID/kontonummer før saken settes til utbetalt.");
+      return;
+    }
+
+    setStatusText("Setter status til Utbetalt og genererer PDF...");
+    try {
+      await saveForing("Utbetalt");
+      setForingStatus("Utbetalt");
+      await generateSettlementPdfWithLatestData();
+      setStatusText("Saken er satt til Utbetalt og PDF er lastet ned.");
+    } catch (error) {
+      setStatusText(error.message || "Ukjent feil.");
+    }
+  }
+
+  async function handleReopenCase() {
+    setStatusText("Gjenåpner sak...");
+    try {
+      const response = await authFetch(`/api/foringer/${foringId}/reopen`, {
+        method: "POST",
+      });
+
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({ error: "Ukjent feil." }));
+        throw new Error(body.error || "Kunne ikke gjenåpne sak.");
+      }
+
+      const payload = await response.json();
+      setForingStatus(normalizeForingStatus(payload?.status));
+      setStatusText("Saken er gjenåpnet og satt til Pågående.");
+      await saveForingMeta("Pagaende");
+    } catch (error) {
+      setStatusText(error.message || "Ukjent feil.");
+    }
+  }
+
+  const [sortColumn, setSortColumn] = useState(null);
+  const [sortDirection, setSortDirection] = useState("asc");
+
+  function handleSortClick(column) {
+    if (sortColumn === column) {
+      if (sortDirection === "asc") {
+        setSortDirection("desc");
+      } else {
+        setSortColumn(null);
+        setSortDirection("asc");
+      }
+    } else {
+      setSortColumn(column);
+      setSortDirection("asc");
+    }
+  }
+
+  function sortIndicator(column) {
+    if (sortColumn !== column) return " ↕";
+    return sortDirection === "asc" ? " ↑" : " ↓";
+  }
+
+  const sortedEntryItems = useMemo(() => {
+    const items = entries.map((row, index) => ({ row, index }));
+    if (!sortColumn) return items;
+    return [...items].sort((a, b) => {
+      const dir = sortDirection === "asc" ? 1 : -1;
+      if (sortColumn === "amount") {
+        const diff = (parseAmountInput(a.row.amount) || 0) - (parseAmountInput(b.row.amount) || 0);
+        return diff * dir;
+      }
+      let valA = "";
+      let valB = "";
+      if (sortColumn === "typeKrav") {
+        const typeKravOrder = { Pant: 0, Utlegg: 1, Inkasso: 2, Annet: 3 };
+        const rankA = typeKravOrder[a.row.typeKrav] ?? 4;
+        const rankB = typeKravOrder[b.row.typeKrav] ?? 4;
+        return (rankA - rankB) * dir;
+      } else if (sortColumn === "owner") {
+        valA = String(a.row.owner || "");
+        valB = String(b.row.owner || "");
+      } else if (sortColumn === "infridd") {
+        valA = a.row.infridd ? "0" : "1";
+        valB = b.row.infridd ? "0" : "1";
+      }
+      return valA.localeCompare(valB, "nb") * dir;
+    });
+  }, [entries, sortColumn, sortDirection]);
+
   const rowsToInfris = useMemo(
-    () => entries.map((row, index) => ({ row, index })).filter((item) => item.row.infridd),
-    [entries]
+    () => sortedEntryItems.filter((item) => item.row.infridd),
+    [sortedEntryItems]
   );
 
   const rowsNotToInfris = useMemo(
-    () => entries.map((row, index) => ({ row, index })).filter((item) => !item.row.infridd),
-    [entries]
+    () => sortedEntryItems.filter((item) => !item.row.infridd),
+    [sortedEntryItems]
   );
   const displayLineNumbers = useMemo(() => {
     const usedNumbers = new Set(
@@ -1104,14 +1401,17 @@ export default function ForingPage() {
     return numbersByIndex;
   }, [entries]);
   const isReadOnlyStatus = foringStatus === "Avsluttet" || foringStatus === "Utbetalt";
+  const disableTilKundeLink = foringStatus === "Avsluttet";
 
   function renderEntryRow(index, row) {
     const displayLineNumber = displayLineNumbers.get(index) ?? "";
 
+    const isSameDateHighlight = rowDatesMatch(row);
+
     return (
       <tr
         key={`row-${index}`}
-        className={`${row.boligLaan ? "row-boliglaan " : ""}${!row.infridd ? "row-not-infridd " : ""}${!row.creditor.trim() ? "row-empty-creditor" : ""}`.trim()}
+        className={`${isSameDateHighlight ? "row-same-date " : ""}${!row.infridd ? "row-not-infridd " : ""}${!row.creditor.trim() ? "row-empty-creditor" : ""}`.trim()}
       >
         <td>
           <button type="button" className="delete-row-btn" onClick={() => removeRow(index)} disabled={isReadOnlyStatus}>
@@ -1120,22 +1420,60 @@ export default function ForingPage() {
         </td>
         <td>
           <select
-            value={row.boligLaan ? "Ja" : "Nei"}
-            onChange={(event) => updateBoligLaan(index, event.target.value === "Ja")}
+            value={row.typeKrav}
+            onChange={(event) => updateRow(index, { typeKrav: event.target.value })}
             onBlur={requestEntrySave}
             disabled={isReadOnlyStatus}
           >
-            <option value="Ja">Ja</option>
-            <option value="Nei">Nei</option>
+            <option value="">Velg</option>
+            <option value="Pant">Pant</option>
+            <option value="Utlegg">Utlegg</option>
+            <option value="Inkasso">Inkasso</option>
+            <option value="Annet">Annet</option>
           </select>
         </td>
-          <td>{displayLineNumber}</td>
+        <td>
+          <select
+            value={row.fullmakt}
+            onChange={(event) => updateRow(index, { fullmakt: event.target.value })}
+            onBlur={requestEntrySave}
+            disabled={isReadOnlyStatus}
+          >
+            <option value="Nei">Nei</option>
+            <option value="Sendt">Sendt</option>
+          </select>
+        </td>
         <td>
           <input
             list="creditor-options"
             value={row.creditor}
             onChange={(event) => handleCreditorChange(index, event.target.value)}
             onBlur={requestEntrySave}
+            disabled={isReadOnlyStatus}
+          />
+        </td>
+        <td>
+          <input
+            className={hasInvalidField(index, "accountNumber") ? "input-invalid" : ""}
+            value={row.accountNumber}
+            inputMode="numeric"
+            onChange={(event) => updateRow(index, { accountNumber: event.target.value })}
+            onBlur={() => {
+              handleAccountBlur(index);
+              requestEntrySave();
+            }}
+            disabled={isReadOnlyStatus}
+          />
+        </td>
+        <td>
+          <input
+            value={row.amount}
+            inputMode="decimal"
+            onChange={(event) => updateRow(index, { amount: event.target.value })}
+            onBlur={() => {
+              handleAmountBlur(index);
+              requestEntrySave();
+            }}
             disabled={isReadOnlyStatus}
           />
         </td>
@@ -1172,31 +1510,6 @@ export default function ForingPage() {
         </td>
         <td>
           <input
-            className={hasInvalidField(index, "accountNumber") ? "input-invalid" : ""}
-            value={row.accountNumber}
-            inputMode="numeric"
-            onChange={(event) => updateRow(index, { accountNumber: event.target.value })}
-            onBlur={() => {
-              handleAccountBlur(index);
-              requestEntrySave();
-            }}
-            disabled={isReadOnlyStatus}
-          />
-        </td>
-        <td>
-          <input
-            value={row.amount}
-            inputMode="decimal"
-            onChange={(event) => updateRow(index, { amount: event.target.value })}
-            onBlur={() => {
-              handleAmountBlur(index);
-              requestEntrySave();
-            }}
-            disabled={isReadOnlyStatus}
-          />
-        </td>
-        <td>
-          <input
             type="date"
             min={getTodayIsoDate()}
             value={row.dueDate}
@@ -1214,20 +1527,6 @@ export default function ForingPage() {
           >
             <option value="Ja">Ja</option>
             <option value="Nei">Nei</option>
-          </select>
-        </td>
-        <td>
-          <select
-            value={row.typeKrav}
-            onChange={(event) => updateRow(index, { typeKrav: event.target.value })}
-            onBlur={requestEntrySave}
-            disabled={isReadOnlyStatus}
-          >
-            <option value="">Velg</option>
-            <option value="Pant">Pant</option>
-            <option value="Utlegg">Utlegg</option>
-            <option value="Inkasso">Inkasso</option>
-            <option value="Annet">Annet</option>
           </select>
         </td>
         <td>
@@ -1266,6 +1565,7 @@ export default function ForingPage() {
             readOnly
           />
         </td>
+        <td>{displayLineNumber}</td>
       </tr>
     );
   }
@@ -1289,10 +1589,10 @@ export default function ForingPage() {
       <form onSubmit={handleSubmit}>
         <div className="actions actions-left top-actions">
           <Link
-            className={`secondary-btn action-link${isReadOnlyStatus ? " disabled-link" : ""}`}
-            to={isReadOnlyStatus ? "#" : `/til-kunde/${foringId}`}
+            className={`secondary-btn action-link${disableTilKundeLink ? " disabled-link" : ""}`}
+            to={disableTilKundeLink ? "#" : `/til-kunde/${foringId}`}
             onClick={(event) => {
-              if (isReadOnlyStatus) event.preventDefault();
+              if (disableTilKundeLink) event.preventDefault();
             }}
           >
             Epost til kunde
@@ -1301,6 +1601,14 @@ export default function ForingPage() {
             Lagre føring
           </button>
           <button type="submit">Generer XML</button>
+          <button type="button" className="success-btn" onClick={handleSetAsPaid} disabled={isReadOnlyStatus}>
+            Sett som utbetalt
+          </button>
+          {isAdmin && foringStatus === "Utbetalt" ? (
+            <button type="button" className="secondary-btn" onClick={handleReopenCase}>
+              Gjenåpne sak
+            </button>
+          ) : null}
         </div>
         {statusText ? <p id="status" className="status-alert">{statusText}</p> : null}
 
@@ -1331,46 +1639,13 @@ export default function ForingPage() {
         </section>
 
         <div className="actions actions-left">
-          <button
-            type="button"
-            className="secondary-btn"
-            disabled={isReadOnlyStatus}
-            onClick={() => {
-              setImportMode("inkasso");
-              setImportText("");
-              setImportPreviewRows([]);
-              setImportPreviewError("");
-              setShowImportModal(true);
-            }}
-          >
+          <button type="button" className="secondary-btn" disabled={isReadOnlyStatus} onClick={() => openImportModal("inkasso")}>
             Importer saker Inkassoregister
           </button>
-          <button
-            type="button"
-            className="secondary-btn"
-            disabled={isReadOnlyStatus}
-            onClick={() => {
-              setImportMode("gjeld");
-              setImportText("");
-              setImportPreviewRows([]);
-              setImportPreviewError("");
-              setShowImportModal(true);
-            }}
-          >
+          <button type="button" className="secondary-btn" disabled={isReadOnlyStatus} onClick={() => openImportModal("gjeld")}>
             Importer Rammelån fra Gjeldsregister
           </button>
-          <button
-            type="button"
-            className="secondary-btn"
-            disabled={isReadOnlyStatus}
-            onClick={() => {
-              setImportMode("nedbetaling");
-              setImportText("");
-              setImportPreviewRows([]);
-              setImportPreviewError("");
-              setShowImportModal(true);
-            }}
-          >
+          <button type="button" className="secondary-btn" disabled={isReadOnlyStatus} onClick={() => openImportModal("nedbetaling")}>
             Importer Nedbetalingslån fra Gjeldsregister
           </button>
         </div>
@@ -1456,6 +1731,94 @@ export default function ForingPage() {
                     setImportPreviewRows([]);
                     setImportPreviewError("");
                   }}
+                >
+                  Avbryt
+                </button>
+              </div>
+            </section>
+          </div>
+        ) : null}
+
+        {showConfirmModal ? (
+          <div className="modal-backdrop" role="presentation" onClick={() => setShowConfirmModal(false)}>
+            <section
+              className="modal-card"
+              role="dialog"
+              aria-modal="true"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <p>{confirmConfig.message}</p>
+              <div className="actions actions-left modal-actions">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowConfirmModal(false);
+                    confirmConfig.onJa?.();
+                  }}
+                >
+                  Ja
+                </button>
+                <button
+                  type="button"
+                  className="secondary-btn"
+                  onClick={() => {
+                    setShowConfirmModal(false);
+                    confirmConfig.onNei?.();
+                  }}
+                >
+                  Nei
+                </button>
+              </div>
+            </section>
+          </div>
+        ) : null}
+
+        {showXmlWarningModal ? (
+          <div className="modal-backdrop" role="presentation" onClick={() => setShowXmlWarningModal(false)}>
+            <section
+              className="modal-card import-modal-card"
+              role="dialog"
+              aria-modal="true"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <h2>Advarsel: avvik på saldo og utbetalingsdata</h2>
+              <p>Det er avvik på saldo oppdatert og utbetalingsdata for følgende føringer:</p>
+              <div className="table-wrap import-preview-table">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Kreditor</th>
+                      <th>Beløp</th>
+                      <th>Dato for utbetaling</th>
+                      <th>Sist oppdatert</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {xmlMismatchRows.map((row, index) => (
+                      <tr key={`mismatch-${index}`}>
+                        <td>{row.creditor}</td>
+                        <td>{row.amount}</td>
+                        <td>{formatDateForPdf(row.dueDate)}</td>
+                        <td>{formatDateForPdf(row.rowUpdatedAt)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="actions actions-left modal-actions">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    setShowXmlWarningModal(false);
+                    await doGenerateXml(pendingXmlEntriesRef.current);
+                  }}
+                >
+                  Generer XML likevel
+                </button>
+                <button
+                  type="button"
+                  className="secondary-btn"
+                  onClick={() => setShowXmlWarningModal(false)}
                 >
                   Avbryt
                 </button>
@@ -1587,20 +1950,20 @@ export default function ForingPage() {
             <thead>
               <tr>
                 <th>Slett</th>
-                <th>Boliglån</th>
-                <th>#</th>
+                <th className="th-sortable" onClick={() => handleSortClick("typeKrav")}>Type krav{sortIndicator("typeKrav")}</th>
+                <th>Fullmakt</th>
                 <th>Kreditor</th>
+                <th>Kontonummer</th>
+                <th className="th-sortable" onClick={() => handleSortClick("amount")}>Belop{sortIndicator("amount")}</th>
                 <th>KID</th>
                 <th>Notat til kunde</th>
                 <th>Internt notat</th>
-                <th>Kontonummer</th>
-                <th>Belop</th>
                 <th>Dato for utbetaling</th>
-                <th>Skal innfris</th>
-                <th>Type krav</th>
-                <th>Eier</th>
+                <th className="th-sortable" onClick={() => handleSortClick("infridd")}>Skal innfris{sortIndicator("infridd")}</th>
+                <th className="th-sortable" onClick={() => handleSortClick("owner")}>Eier{sortIndicator("owner")}</th>
                 <th>Kilde</th>
                 <th>Sist oppdatert</th>
+                <th>#</th>
               </tr>
             </thead>
             <tbody>
@@ -1640,6 +2003,41 @@ export default function ForingPage() {
           </button>
           <button type="button" className="secondary-btn" onClick={setTodayOnAllRows} disabled={isReadOnlyStatus}>
             Sett dagens dato på alle linjer
+          </button>
+        </div>
+        <div className="actions actions-left">
+          <button
+            type="button"
+            className="delete-btn"
+            disabled={isReadOnlyStatus}
+            onClick={() => showConfirm(
+              "Vil du slette alle føringer fra Rammelån Gjeldsregister?",
+              () => deleteRowsBySource("Rammelån Gjeldsregister")
+            )}
+          >
+            Slett alle rammelån
+          </button>
+          <button
+            type="button"
+            className="delete-btn"
+            disabled={isReadOnlyStatus}
+            onClick={() => showConfirm(
+              "Vil du slette alle føringer fra Nedbetalingslån Gjeldsregister?",
+              () => deleteRowsBySource("Nedbetalingslån Gjeldsregister")
+            )}
+          >
+            Slett alle nedbetalingslån
+          </button>
+          <button
+            type="button"
+            className="delete-btn"
+            disabled={isReadOnlyStatus}
+            onClick={() => showConfirm(
+              "Vil du slette alle føringer fra Inkassoregister?",
+              () => deleteRowsBySource("Inkassoregister")
+            )}
+          >
+            Slett alle inkassosaker
           </button>
         </div>
       </form>

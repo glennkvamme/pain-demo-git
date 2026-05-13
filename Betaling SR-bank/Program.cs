@@ -293,6 +293,10 @@ app.MapPut("/api/foringer/{id}", async (string id, HttpRequest request, HttpCont
         {
             return Results.Json(new { error = "Fant ikke foringen." }, statusCode: 404);
         }
+        if (string.Equals(item.Status, ForingStatuses.Utbetalt, StringComparison.Ordinal))
+        {
+            return Results.Json(new { error = "Saken er utbetalt og kan ikke redigeres." }, statusCode: 409);
+        }
         var before = ForingAuditSnapshot.From(item);
 
         if (payload?.CloNumber is not null)
@@ -445,6 +449,61 @@ app.MapPut("/api/foringer/{id}", async (string id, HttpRequest request, HttpCont
         return Results.Json(new { error = "Kunne ikke oppdatere foring." }, statusCode: 500);
     }
 }).RequireAuthorization("AdvisorOrAdmin");
+
+app.MapPost("/api/foringer/{id}/reopen", (string id, HttpContext httpContext) =>
+{
+    try
+    {
+        var actor = AuditActor.FromHttpContext(httpContext, auth0RolesClaim);
+        var list = dataStore.ReadForinger();
+        var item = list.FirstOrDefault(x => x.Id == id);
+        if (item is null)
+        {
+            return Results.Json(new { error = "Fant ikke foringen." }, statusCode: 404);
+        }
+
+        if (!string.Equals(item.Status, ForingStatuses.Utbetalt, StringComparison.Ordinal))
+        {
+            return Results.Json(new { error = "Kun saker med status Utbetalt kan gjenapnes." }, statusCode: 400);
+        }
+
+        item.Status = ForingStatuses.Pagaende;
+        item.UpdatedAt = DateTime.UtcNow.ToString("o");
+        dataStore.WriteForinger(list);
+
+        try
+        {
+            auditLogger.Write(new AuditLogEntry
+            {
+                EventType = "foring_reopened",
+                ActorUserId = actor.UserId,
+                ActorEmail = actor.Email,
+                ActorRoles = actor.Roles,
+                EntityType = "foring",
+                EntityId = item.Id,
+                ForingId = item.Id,
+                CloNumber = item.CloNumber,
+                Ip = actor.Ip,
+                UserAgent = actor.UserAgent,
+                Message = "Foring gjenapnet av administrator.",
+                Changes = new List<AuditFieldChange>
+                {
+                    new() { Field = "status", OldValue = ForingStatuses.Utbetalt, NewValue = ForingStatuses.Pagaende }
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[audit] Kunne ikke logge foring_reopened: {ex.Message}");
+        }
+
+        return Results.Json(item);
+    }
+    catch
+    {
+        return Results.Json(new { error = "Kunne ikke gjenapne foring." }, statusCode: 500);
+    }
+}).RequireAuthorization("AdminOnly");
 
 app.MapPut("/api/creditors", async (HttpRequest request) =>
 {
@@ -1760,11 +1819,11 @@ static class PainXml
 
         return $"""
 <?xml version="1.0" encoding="UTF-8"?>
-<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.001.001.03">
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.001.001.09">
   <CstmrCdtTrfInitn>
     <GrpHdr>
       <MsgId>MSG{Escape(stamp)}</MsgId>
-      <CreDtTm>{Escape(nowUtc.ToString("yyyy-MM-ddTHH:mm:ss"))}</CreDtTm>
+      <CreDtTm>{Escape(nowUtc.ToString("yyyy-MM-ddTHH:mm:ss'Z'"))}</CreDtTm>
       <NbOfTxs>{transactions.Count}</NbOfTxs>
       <CtrlSum>{Escape(totalAmount)}</CtrlSum>
       <InitgPty>
@@ -1774,7 +1833,7 @@ static class PainXml
             <Othr>
               <Id>{Escape(PayerOrgNo)}</Id>
               <SchmeNm>
-                <Cd>CUST</Cd>
+                <Cd>TXID</Cd>
               </SchmeNm>
             </Othr>
           </OrgId>
@@ -1809,7 +1868,9 @@ static class PainXml
           <Cd>SUPP</Cd>
         </CtgyPurp>
       </PmtTpInf>
-      <ReqdExctnDt>{Escape(dueDate)}</ReqdExctnDt>
+      <ReqdExctnDt>
+        <Dt>{Escape(dueDate)}</Dt>
+      </ReqdExctnDt>
       <Dbtr>
         <Nm>{Escape(PayerName)}</Nm>
         <PstlAdr>
@@ -1820,7 +1881,7 @@ static class PainXml
             <Othr>
               <Id>{Escape(PayerOrgNo)}</Id>
               <SchmeNm>
-                <Cd>CUST</Cd>
+                <Cd>TXID</Cd>
               </SchmeNm>
             </Othr>
           </OrgId>
@@ -1883,11 +1944,6 @@ static class PainXml
 
     private static string BuildRemittanceXml(ValidatedEntry tx)
     {
-        var addtlRmtInfValues = BuildAddtlRmtInfValues(tx.CustomerNote)
-            .Select(value => $"            <AddtlRmtInf>{Escape(value)}</AddtlRmtInf>")
-            .ToList();
-        var addtlRmtInfXml = string.Join('\n', addtlRmtInfValues);
-
         if (tx.Kid.Length > 0)
         {
             return $"""
@@ -1901,7 +1957,6 @@ static class PainXml
               </Tp>
               <Ref>{Escape(tx.Kid)}</Ref>
             </CdtrRefInf>
-{addtlRmtInfXml}
           </Strd>
         </RmtInf>
 """;
@@ -1909,11 +1964,13 @@ static class PainXml
 
         if (tx.CustomerNote.Length > 0)
         {
+            var ustrdElements = SplitUstrd(tx.CustomerNote)
+                .Select(chunk => $"          <Ustrd>{Escape(chunk)}</Ustrd>")
+                .ToList();
+            var ustrdXml = string.Join('\n', ustrdElements);
             return $"""
 <RmtInf>
-          <Strd>
-{addtlRmtInfXml}
-          </Strd>
+{ustrdXml}
         </RmtInf>
 """;
         }
@@ -1921,29 +1978,11 @@ static class PainXml
         return string.Empty;
     }
 
-    private static List<string> BuildAddtlRmtInfValues(string customerNote)
+    private static IEnumerable<string> SplitUstrd(string value)
     {
-        var values = new List<string>();
-        var cleanCustomerNote = (customerNote ?? string.Empty).Trim();
-        if (cleanCustomerNote.Length > 0)
+        for (var i = 0; i < value.Length; i += 140)
         {
-            values.AddRange(SplitIntoChunks(cleanCustomerNote, 140));
-        }
-
-        if (values.Count > 3)
-        {
-            return values.Take(3).ToList();
-        }
-
-        return values;
-    }
-
-    private static IEnumerable<string> SplitIntoChunks(string value, int maxLength)
-    {
-        for (var i = 0; i < value.Length; i += maxLength)
-        {
-            var length = Math.Min(maxLength, value.Length - i);
-            yield return value.Substring(i, length);
+            yield return value.Substring(i, Math.Min(140, value.Length - i));
         }
     }
 
@@ -1955,7 +1994,7 @@ static class PainXml
 
 static class PainPreflight
 {
-    private const string PainNamespace = "urn:iso:std:iso:20022:tech:xsd:pain.001.001.03";
+    private const string PainNamespace = "urn:iso:std:iso:20022:tech:xsd:pain.001.001.09";
 
     public static ValidationResult<bool> Validate(string xml)
     {
@@ -2067,42 +2106,46 @@ static class PainPreflight
             }
 
             var hasStrd = tx.SelectSingleNode("p:RmtInf/p:Strd", ns) is not null;
-            if (!hasStrd)
+            var hasUstrd = tx.SelectSingleNode("p:RmtInf/p:Ustrd", ns) is not null;
+            if (!hasStrd && !hasUstrd)
             {
-                return ValidationResult<bool>.Fail($"Linje {line}: RmtInf/Strd ma vaere satt.");
+                return ValidationResult<bool>.Fail($"Linje {line}: RmtInf ma inneholde enten Strd eller Ustrd.");
             }
 
-            var addtlRemittanceNodes = tx.SelectNodes("p:RmtInf/p:Strd/p:AddtlRmtInf", ns);
-            if (addtlRemittanceNodes is not null && addtlRemittanceNodes.Count > 3)
+            if (hasUstrd)
             {
-                return ValidationResult<bool>.Fail($"Linje {line}: Maks 3 AddtlRmtInf er tillatt.");
-            }
-
-            if (addtlRemittanceNodes is not null)
-            {
-                foreach (XmlNode addtlNode in addtlRemittanceNodes)
+                var ustrdNodes = tx.SelectNodes("p:RmtInf/p:Ustrd", ns);
+                if (ustrdNodes is null || ustrdNodes.Count == 0 || ustrdNodes.Count > 2)
                 {
-                    var addtlValue = (addtlNode.InnerText ?? string.Empty).Trim();
-                    if (addtlValue.Length is < 1 or > 140)
+                    return ValidationResult<bool>.Fail($"Linje {line}: Ustrd ma vaere 1-2 elementer (maks 280 tegn totalt).");
+                }
+
+                foreach (XmlNode ustrdNode in ustrdNodes)
+                {
+                    var ustrdValue = (ustrdNode.InnerText ?? string.Empty).Trim();
+                    if (ustrdValue.Length is < 1 or > 140)
                     {
-                        return ValidationResult<bool>.Fail($"Linje {line}: AddtlRmtInf ma vaere 1-140 tegn.");
+                        return ValidationResult<bool>.Fail($"Linje {line}: Hvert Ustrd-element ma vaere 1-140 tegn.");
                     }
                 }
             }
 
-            var kidRefNode = tx.SelectSingleNode("p:RmtInf/p:Strd/p:CdtrRefInf/p:Ref", ns);
-            if (kidRefNode is not null)
+            if (hasStrd)
             {
-                var refCode = tx.SelectSingleNode("p:RmtInf/p:Strd/p:CdtrRefInf/p:Tp/p:CdOrPrtry/p:Cd", ns)?.InnerText;
-                if (!string.Equals(refCode, "SCOR", StringComparison.Ordinal))
+                var kidRefNode = tx.SelectSingleNode("p:RmtInf/p:Strd/p:CdtrRefInf/p:Ref", ns);
+                if (kidRefNode is not null)
                 {
-                    return ValidationResult<bool>.Fail($"Linje {line}: Strukturert KID ma bruke CdtrRefInf/Tp/CdOrPrtry/Cd = SCOR.");
-                }
+                    var refCode = tx.SelectSingleNode("p:RmtInf/p:Strd/p:CdtrRefInf/p:Tp/p:CdOrPrtry/p:Cd", ns)?.InnerText;
+                    if (!string.Equals(refCode, "SCOR", StringComparison.Ordinal))
+                    {
+                        return ValidationResult<bool>.Fail($"Linje {line}: Strukturert KID ma bruke CdtrRefInf/Tp/CdOrPrtry/Cd = SCOR.");
+                    }
 
-                var kidRef = kidRefNode.InnerText ?? string.Empty;
-                if (kidRef.Length < 2 || kidRef.Length > 25 || !kidRef.All(char.IsDigit))
-                {
-                    return ValidationResult<bool>.Fail($"Linje {line}: KID-referanse ma vaere 2-25 sifre.");
+                    var kidRef = kidRefNode.InnerText ?? string.Empty;
+                    if (kidRef.Length < 2 || kidRef.Length > 25 || !kidRef.All(char.IsDigit))
+                    {
+                        return ValidationResult<bool>.Fail($"Linje {line}: KID-referanse ma vaere 2-25 sifre.");
+                    }
                 }
             }
         }
